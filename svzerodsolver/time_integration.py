@@ -64,8 +64,8 @@ class GenAlpha:
         # jacobian matrix
         if self.n > 800:
             if (self.n*self.n*5*np.float64().nbytes) > 0.75*psutil.virtual_memory().available:
-                _,name = tempfile.mkstemp(suffix='_M.bin')
-                self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
+                #_,name = tempfile.mkstemp(suffix='_M.bin')
+                #self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
                 self.on_disk = True
             else:
                 self.on_disk = False
@@ -73,7 +73,7 @@ class GenAlpha:
             self.sparse = True
         else:
             self.solver = np.linalg.solve
-            self.M      = np.zeros((self.n,self.n))
+            #self.M      = np.zeros((self.n,self.n))
             self.sparse = False
             self.on_disk = False
         # residual vector
