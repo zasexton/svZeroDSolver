@@ -75,7 +75,7 @@ class GenAlpha:
             self.solver = np.linalg.solve
             self.M      = np.zeros((self.n,self.n))
             self.sparse = False
-
+            self.on_disk = False
         # residual vector
         self.res = np.zeros(self.n)
 
