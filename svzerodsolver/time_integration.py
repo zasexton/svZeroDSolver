@@ -121,7 +121,7 @@ class GenAlpha:
         if not self.sparse:
             self.res = - self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C']
         else:
-            self.res = csr_matrix(- self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C'])
+            self.res = np.matrix(- self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C'])
 
     def form_matrix_NR_numerical(self, res_i, ydotam, args, block_list, epsilon):
         """
