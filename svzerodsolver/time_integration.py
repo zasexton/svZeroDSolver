@@ -35,6 +35,7 @@ import scipy
 import scipy.sparse.linalg
 from scipy.sparse import csr_matrix
 import tempfile
+import psutil
 import copy
 
 try:
@@ -62,8 +63,12 @@ class GenAlpha:
 
         # jacobian matrix
         if self.n > 800:
-            _,name = tempfile.mkstemp(suffix='_M.bin')
-            self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
+            if (self.n*self.n*5*np.float64().nbytes) > 0.75*psutil.virtual_memory().available:
+                _,name = tempfile.mkstemp(suffix='_M.bin')
+                self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
+                self.on_disk = True
+            else:
+                self.on_disk = False
             self.solver = scipy.sparse.linalg.spsolve
             self.sparse = True
         else:
@@ -77,13 +82,13 @@ class GenAlpha:
         self.mats = ['E', 'F', 'dE', 'dF', 'dC']
         self.vecs = ['C']
         for m in self.mats:
-            if not self.sparse:
+            if not self.on_disk:
                 self.mat[m] = np.zeros((self.n, self.n))
             else:
                 _,name = tempfile.mkstemp(suffix='_'+m+'.bin')
                 self.mat[m] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,self.n))
         for v in self.vecs:
-            if not self.sparse:
+            if not self.on_disk:
                 self.mat[v] = np.zeros(self.n)
             else:
                 _,name = tempfile.mkstemp(suffix='_'+v+'.bin')
