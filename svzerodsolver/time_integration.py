@@ -61,9 +61,7 @@ class GenAlpha:
         self.mat = {}
 
         # jacobian matrix
-        # self.M = np.zeros((self.n, self.n))
-        # self.sparse = False
-        if self.n > 2:
+        if self.n > 800:
             _,name = tempfile.mkstemp(suffix='_M.bin')
             self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
             self.solver = scipy.sparse.linalg.spsolve
@@ -187,12 +185,8 @@ class GenAlpha:
         curr_ydot = ydot.copy() * ((self.gamma - 0.5) / self.gamma)
 
         # Substep level quantities
-        #if not self.sparse:
         yaf = y + self.alpha_f * (curr_y - y)
         ydotam = ydot + self.alpha_m * (curr_ydot - ydot)
-        #else:
-        #    yaf = csr_matrix(y+self.alpha_f*(curr_y - y))
-        #    ydotam = csr_matrix(ydot+self.alpha_m*(curr_ydot-ydot))
 
         # initialize solution
         args['Time'] = t + self.alpha_f * dt
@@ -223,8 +217,6 @@ class GenAlpha:
             # solve for Newton increment
             dy = self.solver(self.M, self.res)
 
-            #if self.sparse:
-            #    dy = dy.toarray()
             # update solution
             yaf += dy
             ydotam += dy * fac_ydotam
@@ -242,9 +234,6 @@ class GenAlpha:
         curr_y = y + (yaf - y) / self.alpha_f
         curr_ydot = ydot + (ydotam - ydot) / self.alpha_m
 
-        #if sparse:
-        #    curr_y = curr_y.toarray()
-        #    curr_ydot = curr_ydot.toarray()
 
         args['Time'] = t + dt
 
