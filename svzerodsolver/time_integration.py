@@ -223,8 +223,8 @@ class GenAlpha:
             # solve for Newton increment
             dy = self.solver(self.M, self.res)
 
-            if self.sparse:
-                dy = dy.toarray()
+            #if self.sparse:
+            #    dy = dy.toarray()
             # update solution
             yaf += dy
             ydotam += dy * fac_ydotam
