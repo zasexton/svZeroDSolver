@@ -188,12 +188,12 @@ class GenAlpha:
         curr_ydot = ydot.copy() * ((self.gamma - 0.5) / self.gamma)
 
         # Substep level quantities
-        if not self.sparse:
-            yaf = y + self.alpha_f * (curr_y - y)
-            ydotam = ydot + self.alpha_m * (curr_ydot - ydot)
-        else:
-            yaf = csr_matrix(y+self.alpha_f*(curr_y - y))
-            ydotam = csr_matrix(ydot+self.alpha_m*(curr_ydot-ydot))
+        #if not self.sparse:
+        yaf = y + self.alpha_f * (curr_y - y)
+        ydotam = ydot + self.alpha_m * (curr_ydot - ydot)
+        #else:
+        #    yaf = csr_matrix(y+self.alpha_f*(curr_y - y))
+        #    ydotam = csr_matrix(ydot+self.alpha_m*(curr_ydot-ydot))
 
         # initialize solution
         args['Time'] = t + self.alpha_f * dt
@@ -224,6 +224,8 @@ class GenAlpha:
             # solve for Newton increment
             dy = self.solver(self.M, self.res)
 
+            if self.sparse:
+                dy = dy.toarray()
             # update solution
             yaf += dy
             ydotam += dy * fac_ydotam
@@ -231,7 +233,7 @@ class GenAlpha:
             if np.isnan(self.res).any():
                 raise RuntimeError('Solution nan')
 
-            args['Solution'] = yaf.toarray()
+            args['Solution'] = yaf
             iit += 1
 
         if iit >= nit:
@@ -241,9 +243,9 @@ class GenAlpha:
         curr_y = y + (yaf - y) / self.alpha_f
         curr_ydot = ydot + (ydotam - ydot) / self.alpha_m
 
-        if sparse:
-            curr_y = curr_y.toarray()
-            curr_ydot = curr_ydot.toarray()
+        #if sparse:
+        #    curr_y = curr_y.toarray()
+        #    curr_ydot = curr_ydot.toarray()
 
         args['Time'] = t + dt
 
