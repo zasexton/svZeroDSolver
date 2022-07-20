@@ -34,6 +34,7 @@ import numpy as np
 import scipy
 import scipy.sparse.linalg
 from scipy.sparse import csr_matrix
+import tempfile
 import copy
 
 try:
@@ -60,12 +61,18 @@ class GenAlpha:
         self.mat = {}
 
         # jacobian matrix
-        self.M = np.zeros((self.n, self.n))
-        self.sparse = False
-        if self.n > 800:
+        # self.M = np.zeros((self.n, self.n))
+        # self.sparse = False
+        if self.n > 2:
+            print('SPARSE')
+            _,name = tempfile.mkstemp(suffix='_M.bin')
+            self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
             self.solver = scipy.sparse.linalg.spsolve
+            self.sparse = True
         else:
             self.solver = np.linalg.solve
+            self.M      = np.zeros((self.n,self.n))
+            self.sparse = False
 
         # residual vector
         self.res = np.zeros(self.n)
@@ -73,9 +80,17 @@ class GenAlpha:
         self.mats = ['E', 'F', 'dE', 'dF', 'dC']
         self.vecs = ['C']
         for m in self.mats:
-            self.mat[m] = np.zeros((self.n, self.n))
+            if not self.sparse:
+                self.mat[m] = np.zeros((self.n, self.n))
+            else:
+                _,name = tempfile.mkstemp(suffix='_'+m+'.bin')
+                self.mat[m] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,self.n))
         for v in self.vecs:
-            self.mat[v] = np.zeros(self.n)
+            if not self.sparse:
+                self.mat[v] = np.zeros(self.n)
+            else:
+                _,name = tempfile.mkstemp(suffix='_'+v+'.bin')
+                self.mat[v] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,))
 
 
     def assemble_structures(self, block_list):
@@ -94,13 +109,19 @@ class GenAlpha:
         """
         Create Jacobian matrix
         """
-        self.M = (self.mat['F'] + (self.mat['dE'] + self.mat['dF'] + self.mat['dC'] + self.mat['E'] * self.fac * invdt))
+        if not self.sparse:
+            self.M = (self.mat['F'] + (self.mat['dE'] + self.mat['dF'] + self.mat['dC'] + self.mat['E'] * self.fac * invdt))
+        else:
+            self.M = csr_matrix(self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt))
 
     def form_rhs_NR(self, y, ydot):
         """
         Create residual vector
         """
-        self.res = - self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C']
+        if not self.sparse:
+            self.res = - self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C']
+        else:
+            self.res = csr_matrix(- self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C'])
 
     def form_matrix_NR_numerical(self, res_i, ydotam, args, block_list, epsilon):
         """
@@ -167,8 +188,12 @@ class GenAlpha:
         curr_ydot = ydot.copy() * ((self.gamma - 0.5) / self.gamma)
 
         # Substep level quantities
-        yaf = y + self.alpha_f * (curr_y - y)
-        ydotam = ydot + self.alpha_m * (curr_ydot - ydot)
+        if not self.sparse:
+            yaf = y + self.alpha_f * (curr_y - y)
+            ydotam = ydot + self.alpha_m * (curr_ydot - ydot)
+        else:
+            yaf = csr_matrix(y+self.alpha_f*(curr_y - y))
+            ydotam = csr_matrix(ydot+self.alpha_m*(curr_ydot-ydot))
 
         # initialize solution
         args['Time'] = t + self.alpha_f * dt
@@ -215,6 +240,10 @@ class GenAlpha:
         # update time step
         curr_y = y + (yaf - y) / self.alpha_f
         curr_ydot = ydot + (ydotam - ydot) / self.alpha_m
+
+        if sparse:
+            curr_y = curr_y.toarray()
+            curr_ydot = curr_ydot.toarray()
 
         args['Time'] = t + dt
 
