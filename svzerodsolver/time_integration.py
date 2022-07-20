@@ -231,7 +231,7 @@ class GenAlpha:
             if np.isnan(self.res).any():
                 raise RuntimeError('Solution nan')
 
-            args['Solution'] = yaf
+            args['Solution'] = yaf.toarray()
             iit += 1
 
         if iit >= nit:
