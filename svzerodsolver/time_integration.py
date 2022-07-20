@@ -33,7 +33,7 @@
 import numpy as np
 import scipy
 import scipy.sparse.linalg
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, coo_matrix
 import tempfile
 import psutil
 import copy
@@ -85,13 +85,13 @@ class GenAlpha:
             if not self.on_disk:
                 self.mat[m] = np.zeros((self.n, self.n))
             else:
-                _,name = tempfile.mkstemp(suffix='_'+m+'.bin')
+                _,name = tempfile.TemporaryFile(suffix='_'+m+'.bin')
                 self.mat[m] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,self.n))
         for v in self.vecs:
             if not self.on_disk:
                 self.mat[v] = np.zeros(self.n)
             else:
-                _,name = tempfile.mkstemp(suffix='_'+v+'.bin')
+                _,name = tempfile.TemporaryFile(suffix='_'+v+'.bin')
                 self.mat[v] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,))
 
 
@@ -114,7 +114,10 @@ class GenAlpha:
         if not self.sparse:
             self.M = (self.mat['F'] + (self.mat['dE'] + self.mat['dF'] + self.mat['dC'] + self.mat['E'] * self.fac * invdt))
         else:
-            self.M = csr_matrix(self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt))
+            tmp_M  = self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt)
+            I,J    = tmp_M.nonzero()
+            self.M = coo_matrix((tmp_M[I,J],(I,J))).tocsr()
+            #self.M = csr_matrix(self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt))
 
     def form_rhs_NR(self, y, ydot):
         """
