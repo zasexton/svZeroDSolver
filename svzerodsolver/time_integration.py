@@ -64,7 +64,6 @@ class GenAlpha:
         # self.M = np.zeros((self.n, self.n))
         # self.sparse = False
         if self.n > 2:
-            print('SPARSE')
             _,name = tempfile.mkstemp(suffix='_M.bin')
             self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
             self.solver = scipy.sparse.linalg.spsolve
@@ -121,7 +120,7 @@ class GenAlpha:
         if not self.sparse:
             self.res = - self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C']
         else:
-            self.res = np.matrix(- self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C'])
+            self.res = np.matrix(- self.mat['E'].dot(ydot) - self.mat['F'].dot(y) - self.mat['C']).T
 
     def form_matrix_NR_numerical(self, res_i, ydotam, args, block_list, epsilon):
         """
