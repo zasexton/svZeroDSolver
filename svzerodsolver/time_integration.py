@@ -85,14 +85,14 @@ class GenAlpha:
             if not self.on_disk:
                 self.mat[m] = np.zeros((self.n, self.n))
             else:
-                _,name = tempfile.TemporaryFile(suffix='_'+m+'.bin')
-                self.mat[m] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,self.n))
+                #name = tempfile.TemporaryFile(suffix='_'+m+'.bin')
+                self.mat[m] = np.memmap(m+'.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
         for v in self.vecs:
             if not self.on_disk:
                 self.mat[v] = np.zeros(self.n)
             else:
-                _,name = tempfile.TemporaryFile(suffix='_'+v+'.bin')
-                self.mat[v] = np.memmap(name,dtype='float64',mode='w+',shape=(self.n,))
+                #name = tempfile.TemporaryFile(suffix='_'+v+'.bin')
+                self.mat[v] = np.memmap(v+'.bin',dtype='float64',mode='w+',shape=(self.n,))
 
 
     def assemble_structures(self, block_list):
