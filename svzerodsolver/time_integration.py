@@ -43,6 +43,13 @@ try:
 except:
     pass
 
+def construct(M):
+    I,J  = M.nonzero()
+    data = M[I,J]
+    mat  = coo_matrix((data,(I,J))).tocsr()
+    del data
+    return mat
+
 class GenAlpha:
     """
     Solves system E*ydot + F*y + C = 0 with generalized alpha and Newton-Raphson for non-linear residual
@@ -65,7 +72,7 @@ class GenAlpha:
         if self.n > 800:
             if (self.n*self.n*5*np.float64().nbytes) > 0.75*psutil.virtual_memory().available:
                 #_,name = tempfile.mkstemp(suffix='_M.bin')
-                #self.M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
+                self.tmp_M = np.memmap('M.bin',dtype='float64',mode='w+',shape=(self.n,self.n))
                 self.on_disk = True
             else:
                 self.on_disk = False
@@ -114,9 +121,10 @@ class GenAlpha:
         if not self.sparse:
             self.M = (self.mat['F'] + (self.mat['dE'] + self.mat['dF'] + self.mat['dC'] + self.mat['E'] * self.fac * invdt))
         else:
-            tmp_M  = self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt)
-            I,J    = tmp_M.nonzero()
-            self.M = coo_matrix((tmp_M[I,J],(I,J))).tocsr()
+            self.tmp_M = self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt)
+            self.M = construct(self.tmp_M)
+            #I,J    = tmp_M.nonzero()
+            #self.M = coo_matrix((tmp_M[I,J],(I,J))).tocsr()
             #self.M = csr_matrix(self.mat['F']+(self.mat['dE']+self.mat['dF']+self.mat['dC']+self.mat['E']*self.fac*invdt))
 
     def form_rhs_NR(self, y, ydot):
