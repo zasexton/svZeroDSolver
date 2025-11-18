@@ -7,13 +7,107 @@
 #ifndef SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_
 #define SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_
 
-#include <Eigen/Sparse>
 #include <Eigen/SparseLU>
+#include <Eigen/Sparse>
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU) || \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
+#include <Eigen/PardisoSupport>
+#endif
+
 #include <iostream>
 #include <memory>
 
 // Forward declaration of Model
 class Model;
+
+/**
+ * @brief Abstract base class for linear solvers
+ *
+ * This provides a small interface that allows plugging in different
+ * sparse linear solver backends (e.g. SparseLU, Pardiso, etc.)
+ * without changing the rest of the algebra or model code.
+ */
+class LinearSolver {
+ public:
+  virtual ~LinearSolver() = default;
+
+  virtual void analyze_pattern(const Eigen::SparseMatrix<double>& A) = 0;
+
+  virtual void factorize(const Eigen::SparseMatrix<double>& A) = 0;
+
+  virtual void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+                     Eigen::Matrix<double, Eigen::Dynamic, 1>& x) = 0;
+};
+
+/**
+ * @brief Eigen::SparseLU-based implementation of LinearSolver.
+ *
+ * This is the default solver backend and matches the behavior that
+ * SparseSystem used previously.
+ */
+class SparseLULinearSolver : public LinearSolver {
+ public:
+  SparseLULinearSolver() = default;
+  ~SparseLULinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> solver_;
+};
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
+/**
+ * @brief Eigen::PardisoLU-based implementation of LinearSolver.
+ *
+ * This backend requires Eigen to be configured with MKL/PARDISO support.
+ */
+class PardisoLULinearSolver : public LinearSolver {
+ public:
+  PardisoLULinearSolver() = default;
+  ~PardisoLULinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::PardisoLU<Eigen::SparseMatrix<double>> solver_;
+};
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
+/**
+ * @brief Eigen::PardisoLDLT-based implementation of LinearSolver.
+ *
+ * This backend requires Eigen to be configured with MKL/PARDISO support
+ * and is suitable for (numerically) symmetric positive definite systems.
+ */
+class PardisoLDLTLinearSolver : public LinearSolver {
+ public:
+  PardisoLDLTLinearSolver() = default;
+  ~PardisoLDLTLinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::PardisoLDLT<Eigen::SparseMatrix<double>> solver_;
+};
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT
 
 /**
  * @brief Sparse system
@@ -60,11 +154,6 @@ class SparseSystem {
   Eigen::Matrix<double, Eigen::Dynamic, 1>
       dydot;  ///< Solution increment of the system
 
-  std::shared_ptr<Eigen::SparseLU<Eigen::SparseMatrix<double>>> solver =
-      std::shared_ptr<Eigen::SparseLU<Eigen::SparseMatrix<double>>>(
-          new Eigen::SparseLU<Eigen::SparseMatrix<double>>());  ///< Linear
-                                                                ///< solver
-
   /**
    * @brief Reserve memory in system matrices based on number of triplets
    *
@@ -96,9 +185,13 @@ class SparseSystem {
 
   /**
    * @brief Delete dynamically allocated memory (class member
-   * Eigen::SparseLU<Eigen::SparseMatrix> *solver)
+   * LinearSolver solver)
    */
   void clean();
+
+ private:
+  /// Linear solver backend
+  std::shared_ptr<LinearSolver> solver;
 };
 
 #endif  // SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_

@@ -3,11 +3,109 @@
 
 #include "SparseSystem.h"
 
+#include <stdexcept>
+
 #include "Model.h"
 
-SparseSystem::SparseSystem() {}
+void SparseLULinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.analyzePattern(A);
+}
 
-SparseSystem::SparseSystem(int n) {
+void SparseLULinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.factorize(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular. Check your model (connections, boundary "
+        "conditions, parameters).");
+  }
+}
+
+void SparseLULinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error("Linear solve failed.");
+  }
+}
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
+void PardisoLULinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.analyzePattern(A);
+}
+
+void PardisoLULinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.factorize(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular. Check your model (connections, boundary "
+        "conditions, parameters).");
+  }
+}
+
+void PardisoLULinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error("Linear solve failed.");
+  }
+}
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
+void PardisoLDLTLinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.analyzePattern(A);
+}
+
+void PardisoLDLTLinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  solver_.factorize(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular. Check your model (connections, boundary "
+        "conditions, parameters).");
+  }
+}
+
+void PardisoLDLTLinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error("Linear solve failed.");
+  }
+}
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT
+
+namespace {
+
+std::shared_ptr<LinearSolver> make_default_linear_solver() {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_SPARSELU)
+  return std::make_shared<SparseLULinearSolver>();
+#elif defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
+  return std::make_shared<PardisoLULinearSolver>();
+#elif defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
+  return std::make_shared<PardisoLDLTLinearSolver>();
+#else
+  // Fallback to SparseLU if no other backend is configured.
+  return std::make_shared<SparseLULinearSolver>();
+#endif
+}
+
+}  // namespace
+
+SparseSystem::SparseSystem() : solver(make_default_linear_solver()) {}
+
+SparseSystem::SparseSystem(int n) : solver(make_default_linear_solver()) {
   F = Eigen::SparseMatrix<double>(n, n);
   E = Eigen::SparseMatrix<double>(n, n);
   dC_dy = Eigen::SparseMatrix<double>(n, n);
@@ -52,7 +150,7 @@ void SparseSystem::reserve(Model* model) {
   jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
   update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
   jacobian.makeCompressed();
-  solver->analyzePattern(jacobian);  // Let solver analyze pattern
+  solver->analyze_pattern(jacobian);  // Let solver analyze pattern
 }
 
 void SparseSystem::update_residual(
@@ -73,11 +171,5 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
 
 void SparseSystem::solve() {
   solver->factorize(jacobian);
-  if (solver->info() != Eigen::Success) {
-    throw std::runtime_error(
-        "System is singular. Check your model (connections, boundary "
-        "conditions, parameters).");
-  }
-  dydot.setZero();
-  dydot += solver->solve(residual);
+  solver->solve(residual, dydot);
 }

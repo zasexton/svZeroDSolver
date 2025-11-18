@@ -4,8 +4,8 @@
 #include "Integrator.h"
 
 Integrator::Integrator(Model* model, double time_step_size, double rho,
-                       double atol, int max_iter) {
-  this->model = model;
+                       double atol, int max_iter)
+    : system(SparseSystem(model->dofhandler.size())), model(model) {
   alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho);
   alpha_f = 1.0 / (1.0 + rho);
   gamma = 0.5 + alpha_m - alpha_f;
@@ -15,7 +15,6 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
   y_coeff_jacobian = alpha_f * y_coeff;
 
   size = model->dofhandler.size();
-  system = SparseSystem(size);
   this->time_step_size = time_step_size;
   this->atol = atol;
   this->max_iter = max_iter;
