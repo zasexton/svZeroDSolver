@@ -150,27 +150,59 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   find_package(PETSc QUIET)
 
   if(NOT PETSC_FOUND)
-    # If PETSc is not found, fetch the sources for a stable PETSc version so
-    # that the user can build it locally.
-    include(FetchContent)
-    FetchContent_Declare(
-      petsc
-      GIT_REPOSITORY https://gitlab.com/petsc/petsc.git
-      GIT_TAG v3.20.0
-      GIT_SHALLOW TRUE
-      GIT_PROGRESS TRUE
+    # If PETSc is not found, automatically download and build a local PETSc
+    # using ExternalProject. This avoids requiring a system-wide installation.
+    include(ExternalProject)
+
+    # Prefer a Python interpreter that still provides the deprecated 'xdrlib'
+    # module used by PETSc's configure scripts. Fall back to 'python3' if no
+    # older interpreter is available.
+    find_program(SVZERODSOLVER_PETSC_PYTHON
+      NAMES python3.11 python3.10 python3.9 python3.8 python3
     )
-    FetchContent_GetProperties(petsc)
-    if(NOT petsc_POPULATED)
-      FetchContent_Populate(petsc)
+    if(NOT SVZERODSOLVER_PETSC_PYTHON)
+      message(FATAL_ERROR
+        "Could not find a Python interpreter for building PETSc. "
+        "Please install a Python 3.x interpreter (e.g., python3.10) and "
+        "reconfigure, or install PETSc separately so that find_package(PETSc) succeeds.")
     endif()
 
-    message(FATAL_ERROR
-      "SVZERODSOLVER_LINEAR_SOLVER is set to '${SVZERODSOLVER_LINEAR_SOLVER}', "
-      "which requires PETSc.\n"
-      "The PETSc sources have been downloaded to: ${petsc_SOURCE_DIR}\n"
-      "Please build PETSc there (or install it separately) and reconfigure so "
-      "that find_package(PETSc) succeeds.")
+    set(SVZERODSOLVER_PETSC_PREFIX
+        ${CMAKE_BINARY_DIR}/petsc_ep
+        CACHE PATH "Prefix for the internally built PETSc" FORCE)
+    set(SVZERODSOLVER_PETSC_INSTALL_DIR
+        ${SVZERODSOLVER_PETSC_PREFIX}/install
+        CACHE PATH "Install directory for the internally built PETSc" FORCE)
+
+    ExternalProject_Add(petsc_ep
+      PREFIX          ${SVZERODSOLVER_PETSC_PREFIX}
+      GIT_REPOSITORY  https://gitlab.com/petsc/petsc.git
+      GIT_TAG         v3.20.0
+      GIT_SHALLOW     TRUE
+      GIT_PROGRESS    TRUE
+      CONFIGURE_COMMAND
+        ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>
+        ${SVZERODSOLVER_PETSC_PYTHON} ./configure
+          --prefix=${SVZERODSOLVER_PETSC_INSTALL_DIR}
+          --with-debugging=0
+          --with-shared-libraries=1
+          --with-mpi=0
+          --download-f2cblaslapack=1
+      BUILD_COMMAND
+        ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>
+        ${CMAKE_MAKE_PROGRAM} PETSC_DIR=<SOURCE_DIR> PETSC_ARCH=arch-linux-c-opt all
+      INSTALL_COMMAND
+        ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>
+        ${CMAKE_MAKE_PROGRAM} PETSC_DIR=<SOURCE_DIR> PETSC_ARCH=arch-linux-c-opt install
+      UPDATE_DISCONNECTED TRUE
+    )
+
+    # Point the algebra library at the locally built PETSc.
+    set(PETSC_INCLUDE_DIRS ${SVZERODSOLVER_PETSC_INSTALL_DIR}/include)
+    set(PETSC_LIBRARIES    ${SVZERODSOLVER_PETSC_INSTALL_DIR}/lib/libpetsc${CMAKE_SHARED_LIBRARY_SUFFIX})
+
+    # Ensure PETSc is built before the algebra library.
+    add_dependencies(${lib} petsc_ep)
   endif()
 
   target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS})
@@ -178,4 +210,4 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_HAVE_PETSC)
 endif()
 
-target_link_libraries( ${lib} Eigen3::Eigen )
+target_link_libraries(${lib} PUBLIC Eigen3::Eigen)

@@ -99,13 +99,7 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/pybind/pybind11
     GIT_TAG        master
 )
-
-FetchContent_GetProperties(pybind11)
-
-if(NOT pybind11_POPULATED)
-    FetchContent_Populate(pybind11)
-    add_subdirectory(${pybind11_SOURCE_DIR} ${pybind11_BINARY_DIR})
-endif()
+FetchContent_MakeAvailable(pybind11)
 
 # -----------------------------------------------------------------------------
 # Fetch nlohmann/json
@@ -115,6 +109,7 @@ endif()
 FetchContent_Declare(
     json
     URL https://github.com/nlohmann/json/releases/download/v3.11.2/json.tar.xz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
 FetchContent_MakeAvailable(json)
