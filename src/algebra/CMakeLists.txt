@@ -31,6 +31,7 @@ set_property(CACHE SVZERODSOLVER_LINEAR_SOLVER PROPERTY STRINGS
   "ConjugateGradient"
   "LeastSquaresConjugateGradient"
   "BiCGSTAB"
+  "PetscGMRES"
 )
 if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "SparseLU")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_SPARSELU)
@@ -44,11 +45,13 @@ elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "LeastSquaresConjugateGradient")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT)
 elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "BiCGSTAB")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
+  target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 else()
   message(FATAL_ERROR
     "Unknown SVZERODSOLVER_LINEAR_SOLVER='${SVZERODSOLVER_LINEAR_SOLVER}'. "
     "Supported values are: SparseLU, PardisoLU, PardisoLDLT, "
-    "ConjugateGradient, LeastSquaresConjugateGradient, BiCGSTAB.")
+    "ConjugateGradient, LeastSquaresConjugateGradient, BiCGSTAB, PetscGMRES.")
 endif()
 
 # If a Pardiso-based backend is selected, we need Intel MKL with
@@ -106,6 +109,73 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "ConjugateGradient"
     SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE=${SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE}
     SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS=${SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS}
   )
+endif()
+
+# If a PETSc backend is selected, configure PETSc and expose its preconditioners.
+if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
+  # Configure PETSc preconditioner via the same cache variable used for other
+  # iterative solvers so that the interface remains consistent.
+  set(SVZERODSOLVER_ITERATIVE_PRECONDITIONER "jacobi"
+      CACHE STRING
+      "PETSc preconditioner for PetscGMRES (none, jacobi, bjacobi, ilu, gamg, hypre_BoomerAMG)")
+  set_property(CACHE SVZERODSOLVER_ITERATIVE_PRECONDITIONER PROPERTY STRINGS
+    "none"
+    "jacobi"
+    "bjacobi"
+    "ilu"
+    "gamg"
+    "hypre_BoomerAMG"
+  )
+
+  # Expose the chosen PETSc preconditioner type as a string macro to the code.
+  target_compile_definitions(${lib} PUBLIC
+    SVZERODSOLVER_PETSC_PRECONDITIONER=\"${SVZERODSOLVER_ITERATIVE_PRECONDITIONER}\"
+  )
+
+  # Iterative solver control parameters (tolerance and max iterations) are
+  # shared with other iterative backends.
+  set(SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE "1e-6"
+      CACHE STRING
+      "Relative tolerance for iterative linear solvers (e.g., 1e-6)")
+  set(SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS "0"
+      CACHE STRING
+      "Maximum iterations for iterative linear solvers (0 => size-based heuristic)")
+
+  target_compile_definitions(${lib} PUBLIC
+    SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE=${SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE}
+    SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS=${SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS}
+  )
+
+  # Try to find an existing PETSc installation first.
+  find_package(PETSc QUIET)
+
+  if(NOT PETSC_FOUND)
+    # If PETSc is not found, fetch the sources for a stable PETSc version so
+    # that the user can build it locally.
+    include(FetchContent)
+    FetchContent_Declare(
+      petsc
+      GIT_REPOSITORY https://gitlab.com/petsc/petsc.git
+      GIT_TAG v3.20.0
+      GIT_SHALLOW TRUE
+      GIT_PROGRESS TRUE
+    )
+    FetchContent_GetProperties(petsc)
+    if(NOT petsc_POPULATED)
+      FetchContent_Populate(petsc)
+    endif()
+
+    message(FATAL_ERROR
+      "SVZERODSOLVER_LINEAR_SOLVER is set to '${SVZERODSOLVER_LINEAR_SOLVER}', "
+      "which requires PETSc.\n"
+      "The PETSc sources have been downloaded to: ${petsc_SOURCE_DIR}\n"
+      "Please build PETSc there (or install it separately) and reconfigure so "
+      "that find_package(PETSc) succeeds.")
+  endif()
+
+  target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS})
+  target_link_libraries(${lib} PUBLIC ${PETSC_LIBRARIES})
+  target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_HAVE_PETSC)
 endif()
 
 target_link_libraries( ${lib} Eigen3::Eigen )

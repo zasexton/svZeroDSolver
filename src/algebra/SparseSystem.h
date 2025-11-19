@@ -31,6 +31,11 @@ using SvZeroIterativePreconditioner =
 #endif
 #endif
 
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#include <petscksp.h>
+#endif
+
 #include <iostream>
 #include <memory>
 
@@ -146,6 +151,35 @@ class BiCGSTABLinearSolver : public LinearSolver {
       solver_;
 };
 #endif  // SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+/**
+ * @brief PETSc GMRES-based implementation of LinearSolver.
+ *
+ * This backend uses PETSc's KSP with GMRES and a configurable PETSc
+ * preconditioner (e.g., Jacobi, ASM, GAMG, hypre BoomerAMG).
+ */
+class PetscGMRESLinearSolver : public LinearSolver {
+ public:
+  PetscGMRESLinearSolver();
+  ~PetscGMRESLinearSolver() override;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Mat A_ = nullptr;
+  KSP ksp_ = nullptr;
+  Vec x_ = nullptr;
+  Vec b_ = nullptr;
+  PetscInt n_ = 0;
+};
+#endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
 /**
