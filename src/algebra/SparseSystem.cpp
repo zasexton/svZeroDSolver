@@ -4,8 +4,19 @@
 #include "SparseSystem.h"
 
 #include <stdexcept>
+#include <sstream>
 
 #include "Model.h"
+#include "debug.h"
+
+// Default values if not provided via compile definitions from CMake.
+#ifndef SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE
+#define SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE 1e-6
+#endif
+
+#ifndef SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS
+#define SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS 0
+#endif
 
 void SparseLULinearSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& A) {
@@ -31,6 +42,144 @@ void SparseLULinearSolver::solve(
     throw std::runtime_error("Linear solve failed.");
   }
 }
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT)
+void ConjugateGradientLinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>&) {
+  // ConjugateGradient does not require a separate pattern analysis step.
+}
+
+void ConjugateGradientLinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  int max_iters = SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS;
+  if (max_iters <= 0) {
+    const int n = static_cast<int>(A.rows());
+    if (n <= 5000) {
+      max_iters = std::max(50, n);
+    } else if (n <= 100000) {
+      max_iters = 5000;
+    } else {
+      max_iters = 10000;
+    }
+  }
+  solver_.setMaxIterations(max_iters);
+  solver_.setTolerance(SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE);
+
+  solver_.compute(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular or ill-conditioned. Check your model "
+        "(connections, boundary conditions, parameters).");
+  }
+}
+
+void ConjugateGradientLinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    std::ostringstream oss;
+    oss << "Iterative linear solve (ConjugateGradient) failed. "
+        << "info=" << static_cast<int>(solver_.info())
+        << ", iterations=" << solver_.iterations()
+        << ", error=" << solver_.error();
+    throw std::runtime_error(oss.str());
+  }
+}
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT)
+void LeastSquaresConjugateGradientLinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>&) {
+  // LeastSquaresConjugateGradient does not require a separate pattern analysis step.
+}
+
+void LeastSquaresConjugateGradientLinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  int max_iters = SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS;
+  if (max_iters <= 0) {
+    const int n = static_cast<int>(A.rows());
+    if (n <= 5000) {
+      max_iters = std::max(50, n);
+    } else if (n <= 100000) {
+      max_iters = 5000;
+    } else {
+      max_iters = 10000;
+    }
+  }
+  solver_.setMaxIterations(max_iters);
+  solver_.setTolerance(SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE);
+
+  solver_.compute(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular or ill-conditioned. Check your model "
+        "(connections, boundary conditions, parameters).");
+  }
+}
+
+void LeastSquaresConjugateGradientLinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    std::ostringstream oss;
+    oss << "Iterative linear solve (LeastSquaresConjugateGradient) failed. "
+        << "info=" << static_cast<int>(solver_.info())
+        << ", iterations=" << solver_.iterations()
+        << ", error=" << solver_.error();
+    throw std::runtime_error(oss.str());
+  }
+}
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+void BiCGSTABLinearSolver::analyze_pattern(
+    const Eigen::SparseMatrix<double>&) {
+  // BiCGSTAB does not require a separate pattern analysis step.
+}
+
+void BiCGSTABLinearSolver::factorize(
+    const Eigen::SparseMatrix<double>& A) {
+  int max_iters = SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS;
+  if (max_iters <= 0) {
+    const int n = static_cast<int>(A.rows());
+    if (n <= 5000) {
+      max_iters = std::max(50, n);
+    } else if (n <= 100000) {
+      max_iters = 5000;
+    } else {
+      max_iters = 10000;
+    }
+  }
+  solver_.setMaxIterations(max_iters);
+  solver_.setTolerance(SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE);
+
+  solver_.compute(A);
+  if (solver_.info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular or ill-conditioned. Check your model "
+        "(connections, boundary conditions, parameters).");
+  }
+}
+
+void BiCGSTABLinearSolver::solve(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  x.setZero();
+  x += solver_.solve(b);
+  if (solver_.info() != Eigen::Success) {
+    std::ostringstream oss;
+    oss << "Iterative linear solve (BiCGSTAB) failed. "
+        << "info=" << static_cast<int>(solver_.info())
+        << ", iterations=" << solver_.iterations()
+        << ", error=" << solver_.error();
+    throw std::runtime_error(oss.str());
+  }
+}
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB
 
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
 void PardisoLULinearSolver::analyze_pattern(
@@ -91,6 +240,12 @@ namespace {
 std::shared_ptr<LinearSolver> make_default_linear_solver() {
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_SPARSELU)
   return std::make_shared<SparseLULinearSolver>();
+#elif defined(SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT)
+  return std::make_shared<ConjugateGradientLinearSolver>();
+#elif defined(SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT)
+  return std::make_shared<LeastSquaresConjugateGradientLinearSolver>();
+#elif defined(SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+  return std::make_shared<BiCGSTABLinearSolver>();
 #elif defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
   return std::make_shared<PardisoLULinearSolver>();
 #elif defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
@@ -170,6 +325,23 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
 }
 
 void SparseSystem::solve() {
-  solver->factorize(jacobian);
-  solver->solve(residual, dydot);
+  try {
+    solver->factorize(jacobian);
+    solver->solve(residual, dydot);
+  } catch (const std::runtime_error& e) {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT) || \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT) || \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+    // Fallback to a direct SparseLU solve if an iterative backend fails.
+    DEBUG_MSG("Iterative linear solver failed ("
+              << e.what()
+              << "), falling back to SparseLU.");
+    SparseLULinearSolver direct_solver;
+    direct_solver.analyze_pattern(jacobian);
+    direct_solver.factorize(jacobian);
+    direct_solver.solve(residual, dydot);
+#else
+    throw;
+#endif
+  }
 }

@@ -15,6 +15,22 @@
 #include <Eigen/PardisoSupport>
 #endif
 
+#include <Eigen/IterativeLinearSolvers>
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT) ||         \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT) || \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+#if defined(SVZERODSOLVER_PRECONDITIONER_IDENTITY)
+using SvZeroIterativePreconditioner = Eigen::IdentityPreconditioner;
+#elif defined(SVZERODSOLVER_PRECONDITIONER_DIAGONAL)
+using SvZeroIterativePreconditioner =
+    Eigen::DiagonalPreconditioner<double>;
+#else
+using SvZeroIterativePreconditioner =
+    Eigen::DiagonalPreconditioner<double>;
+#endif
+#endif
+
 #include <iostream>
 #include <memory>
 
@@ -61,6 +77,75 @@ class SparseLULinearSolver : public LinearSolver {
  private:
   Eigen::SparseLU<Eigen::SparseMatrix<double>> solver_;
 };
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT)
+/**
+ * @brief Eigen::ConjugateGradient-based implementation of LinearSolver.
+ */
+class ConjugateGradientLinearSolver : public LinearSolver {
+ public:
+  ConjugateGradientLinearSolver() = default;
+  ~ConjugateGradientLinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::ConjugateGradient<Eigen::SparseMatrix<double>,
+                           Eigen::Lower | Eigen::Upper,
+                           SvZeroIterativePreconditioner>
+      solver_;
+};
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT)
+/**
+ * @brief Eigen::LeastSquaresConjugateGradient-based implementation of LinearSolver.
+ */
+class LeastSquaresConjugateGradientLinearSolver : public LinearSolver {
+ public:
+  LeastSquaresConjugateGradientLinearSolver() = default;
+  ~LeastSquaresConjugateGradientLinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::LeastSquaresConjugateGradient<Eigen::SparseMatrix<double>,
+                                       SvZeroIterativePreconditioner>
+      solver_;
+};
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
+/**
+ * @brief Eigen::BiCGSTAB-based implementation of LinearSolver.
+ */
+class BiCGSTABLinearSolver : public LinearSolver {
+ public:
+  BiCGSTABLinearSolver() = default;
+  ~BiCGSTABLinearSolver() override = default;
+
+  void analyze_pattern(const Eigen::SparseMatrix<double>& A) override;
+
+  void factorize(const Eigen::SparseMatrix<double>& A) override;
+
+  void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
+             Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+ private:
+  Eigen::BiCGSTAB<Eigen::SparseMatrix<double>, SvZeroIterativePreconditioner>
+      solver_;
+};
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB
 
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
 /**

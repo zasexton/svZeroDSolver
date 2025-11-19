@@ -28,6 +28,9 @@ set_property(CACHE SVZERODSOLVER_LINEAR_SOLVER PROPERTY STRINGS
   "SparseLU"
   "PardisoLU"
   "PardisoLDLT"
+  "ConjugateGradient"
+  "LeastSquaresConjugateGradient"
+  "BiCGSTAB"
 )
 if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "SparseLU")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_SPARSELU)
@@ -35,10 +38,17 @@ elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PardisoLU")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LU)
 elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PardisoLDLT")
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_PARDISO_LDLT)
+elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "ConjugateGradient")
+  target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_CONJUGATE_GRADIENT)
+elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "LeastSquaresConjugateGradient")
+  target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_LEAST_SQUARES_CONJUGATE_GRADIENT)
+elseif(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "BiCGSTAB")
+  target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_LINEAR_SOLVER_BICGSTAB)
 else()
   message(FATAL_ERROR
     "Unknown SVZERODSOLVER_LINEAR_SOLVER='${SVZERODSOLVER_LINEAR_SOLVER}'. "
-    "Supported values are: SparseLU, PardisoLU, PardisoLDLT.")
+    "Supported values are: SparseLU, PardisoLU, PardisoLDLT, "
+    "ConjugateGradient, LeastSquaresConjugateGradient, BiCGSTAB.")
 endif()
 
 # If a Pardiso-based backend is selected, we need Intel MKL with
@@ -59,6 +69,43 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PardisoLU"
   # Link MKL so that <Eigen/PardisoSupport> can find mkl_pardiso.h and
   # the final binaries are linked to the Pardiso implementation.
   target_link_libraries(${lib} PUBLIC MKL::MKL)
+endif()
+
+# If an iterative backend is selected, expose preconditioner configuration.
+if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "ConjugateGradient"
+   OR SVZERODSOLVER_LINEAR_SOLVER STREQUAL "LeastSquaresConjugateGradient"
+   OR SVZERODSOLVER_LINEAR_SOLVER STREQUAL "BiCGSTAB")
+  set(SVZERODSOLVER_ITERATIVE_PRECONDITIONER "Diagonal"
+      CACHE STRING
+      "Preconditioner for iterative linear solvers (Identity, Diagonal)")
+  set_property(CACHE SVZERODSOLVER_ITERATIVE_PRECONDITIONER PROPERTY STRINGS
+    "Identity"
+    "Diagonal"
+  )
+
+  if(SVZERODSOLVER_ITERATIVE_PRECONDITIONER STREQUAL "Identity")
+    target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_PRECONDITIONER_IDENTITY)
+  elseif(SVZERODSOLVER_ITERATIVE_PRECONDITIONER STREQUAL "Diagonal")
+    target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_PRECONDITIONER_DIAGONAL)
+  else()
+    message(FATAL_ERROR
+      "Unknown SVZERODSOLVER_ITERATIVE_PRECONDITIONER='${SVZERODSOLVER_ITERATIVE_PRECONDITIONER}'. "
+      "Supported values are: Identity, Diagonal.")
+  endif()
+
+  # Iterative solver control parameters (tolerance and max iterations).
+  # These can be tuned for specific hydraulic circuits to reduce fallbacks.
+  set(SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE "1e-6"
+      CACHE STRING
+      "Relative tolerance for iterative linear solvers (e.g., 1e-6)")
+  set(SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS "0"
+      CACHE STRING
+      "Maximum iterations for iterative linear solvers (0 => use system size)")
+
+  target_compile_definitions(${lib} PUBLIC
+    SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE=${SVZERODSOLVER_ITERATIVE_SOLVER_TOLERANCE}
+    SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS=${SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS}
+  )
 endif()
 
 target_link_libraries( ${lib} Eigen3::Eigen )
