@@ -10,7 +10,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 project(svZeroDSolver LANGUAGES C CXX)
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR
+    "In-source builds are not allowed for svZeroDSolver. "
+    "Please create a separate build directory, for example:\n"
+    "  cmake -S . -B build\n")
+endif()
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Disable optional SuperLU detection in third-party projects (e.g. Eigen benchmarks)
+# to avoid crashes in some environments when CMake looks for SuperLU.
+set(CMAKE_DISABLE_FIND_PACKAGE_SuperLU ON CACHE BOOL "" FORCE)
 
 # Force Eigen & superprojects to skip docs/tests/fortran no matter what
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -236,6 +247,14 @@ target_link_libraries(pysvzerod PRIVATE svzero_algebra_library)
 target_link_libraries(pysvzerod PRIVATE svzero_model_library)
 target_link_libraries(pysvzerod PRIVATE svzero_optimize_library)
 target_link_libraries(pysvzerod PRIVATE svzero_solve_library)
+
+# If PETSc is enabled for the algebra library (PetscGMRES backend), link the
+# PETSc libraries into the final executables and Python module as well.
+if(SVZERODSOLVER_HAVE_PETSC)
+  target_link_libraries(svzerodsolver     PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
+  target_link_libraries(svzerodcalibrator PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
+  target_link_libraries(pysvzerod         PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
+endif()
 
 
 # Create distribution

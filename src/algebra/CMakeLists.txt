@@ -208,6 +208,13 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS})
   target_link_libraries(${lib} PUBLIC ${PETSC_LIBRARIES})
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_HAVE_PETSC)
+
+  # Propagate PETSc availability and link information to parent scope so that
+  # final executables/modules can link against PETSc as well. Note that link
+  # libraries on OBJECT libraries are not used when linking, so consumers must
+  # link ${SVZERODSOLVER_PETSC_LIBRARIES} explicitly.
+  set(SVZERODSOLVER_HAVE_PETSC TRUE PARENT_SCOPE)
+  set(SVZERODSOLVER_PETSC_LIBRARIES "${PETSC_LIBRARIES}" PARENT_SCOPE)
 endif()
 
 target_link_libraries(${lib} PUBLIC Eigen3::Eigen)
