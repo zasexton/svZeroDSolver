@@ -3,6 +3,7 @@
 
 #include "SparseSystem.h"
 
+#include <cstdlib>
 #include <stdexcept>
 #include <sstream>
 #include <cstring>
@@ -26,12 +27,29 @@ namespace {
 // Ensure PETSc is initialized once per process.
 void ensure_petsc_initialized() {
   static bool initialized = false;
+  static bool registered_finalize = false;
+
+  auto finalize_petsc = []() {
+    // Guard against double-finalize.
+    static bool finalized_once = false;
+    if (!finalized_once && initialized) {
+      PetscFinalize();
+      finalized_once = true;
+    }
+  };
+
   if (!initialized) {
     PetscErrorCode ierr = PetscInitialize(nullptr, nullptr, nullptr, nullptr);
     if (ierr) {
       throw std::runtime_error("Failed to initialize PETSc");
     }
     initialized = true;
+
+    // Ensure PETSc is finalized on clean exit.
+    if (!registered_finalize) {
+      std::atexit(finalize_petsc);
+      registered_finalize = true;
+    }
   }
 }
 
@@ -260,19 +278,43 @@ void PetscGMRESLinearSolver::analyze_pattern(
 
   PetscErrorCode ierr;
 
-  // For now, create a sequential AIJ matrix. If the application is run under
-  // MPI, PETSc can still manage parallelism internally based on PETSC_COMM_WORLD.
-  ierr = MatCreateSeqAIJ(PETSC_COMM_WORLD, n_, n_, 50, nullptr, &A_);
+  // Create a distributed AIJ matrix and matching distributed vectors. PETSc
+  // handles the communicator splits internally when launched with MPI.
+  ierr = MatCreateAIJ(PETSC_COMM_WORLD, PETSC_DECIDE, PETSC_DECIDE, n_, n_,
+                      50, nullptr, 50, nullptr, &A_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc matrix");
   }
 
-  ierr = VecCreateSeq(PETSC_COMM_WORLD, n_, &x_);
+  ierr = MatGetOwnershipRange(A_, &rstart_, &rend_);
+  if (ierr) {
+    throw std::runtime_error("Failed to query PETSc matrix ownership range");
+  }
+
+  // Report communicator size and matrix type once (rank 0) for debugging.
+  static bool reported_parallel_config = false;
+  if (!reported_parallel_config) {
+    int comm_size = 1;
+    int comm_rank = 0;
+    const PetscMPIInt* petsc_comm_size = nullptr;
+    /* Use PETSc introspection to avoid direct MPI dependency at link time. */
+    MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+    MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+    if (comm_rank == 0) {
+      const char* mtype = nullptr;
+      MatGetType(A_, &mtype);
+      DEBUG_MSG("PETSc GMRES using communicator size " << comm_size
+                 << ", matrix type " << (mtype ? mtype : "<unknown>"));
+    }
+    reported_parallel_config = true;
+  }
+
+  ierr = VecCreateMPI(PETSC_COMM_WORLD, PETSC_DECIDE, n_, &x_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc solution vector");
   }
 
-  ierr = VecCreateSeq(PETSC_COMM_WORLD, n_, &b_);
+  ierr = VecCreateMPI(PETSC_COMM_WORLD, PETSC_DECIDE, n_, &b_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc RHS vector");
   }
@@ -306,10 +348,18 @@ void PetscGMRESLinearSolver::analyze_pattern(
   } else if (std::strcmp(pc_opt, "gamg") == 0) {
     ierr = PCSetType(pc, PCGAMG);
   } else if (std::strcmp(pc_opt, "hypre_BoomerAMG") == 0) {
+#if defined(PETSC_HAVE_HYPRE)
     ierr = PCSetType(pc, PCHYPRE);
     if (!ierr) {
       ierr = PCHYPRESetType(pc, "boomeramg");
     }
+#else
+    throw std::runtime_error(
+        "PETSc was built without HYPRE support, but "
+        "SVZERODSOLVER_ITERATIVE_PRECONDITIONER=hypre_BoomerAMG was requested. "
+        "Reconfigure PETSc with HYPRE enabled (e.g., configure with "
+        "--with-mpi=1 --download-hypre) or select a different preconditioner.");
+#endif
   } else {
     // Default to Jacobi if an unknown option is provided.
     ierr = PCSetType(pc, PCJACOBI);
@@ -337,7 +387,10 @@ void PetscGMRESLinearSolver::factorize(
       const PetscInt row = static_cast<PetscInt>(it.row());
       const PetscInt col = static_cast<PetscInt>(it.col());
       const PetscScalar val = static_cast<PetscScalar>(it.value());
-      ierr = MatSetValue(A_, row, col, val, INSERT_VALUES);
+      // Only insert rows owned by this rank to avoid excessive off-rank traffic.
+      if (row >= rstart_ && row < rend_) {
+        ierr = MatSetValue(A_, row, col, val, INSERT_VALUES);
+      }
       if (ierr) {
         throw std::runtime_error("Failed to set PETSc matrix entry");
       }
@@ -385,9 +438,11 @@ void PetscGMRESLinearSolver::solve(
   }
 
   for (PetscInt i = 0; i < n_; ++i) {
-    ierr = VecSetValue(b_, i, static_cast<PetscScalar>(b[i]), INSERT_VALUES);
-    if (ierr) {
-      throw std::runtime_error("Failed to set PETSc RHS entry");
+    if (i >= rstart_ && i < rend_) {
+      ierr = VecSetValue(b_, i, static_cast<PetscScalar>(b[i]), INSERT_VALUES);
+      if (ierr) {
+        throw std::runtime_error("Failed to set PETSc RHS entry");
+      }
     }
   }
 
@@ -429,10 +484,34 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error(oss.str());
   }
 
-  const PetscScalar* px = nullptr;
-  ierr = VecGetArrayRead(x_, &px);
+  // Gather the distributed solution onto all ranks so downstream code can
+  // continue to treat x as replicated.
+  VecScatter scatter = nullptr;
+  Vec x_seq = nullptr;
+  ierr = VecScatterCreateToAll(x_, &scatter, &x_seq);
   if (ierr) {
-    throw std::runtime_error("Failed to access PETSc solution vector");
+    throw std::runtime_error("Failed to create PETSc scatter to gather solution");
+  }
+
+  ierr = VecScatterBegin(scatter, x_, x_seq, INSERT_VALUES, SCATTER_FORWARD);
+  if (ierr) {
+    VecScatterDestroy(&scatter);
+    VecDestroy(&x_seq);
+    throw std::runtime_error("Failed to begin PETSc solution gather");
+  }
+  ierr = VecScatterEnd(scatter, x_, x_seq, INSERT_VALUES, SCATTER_FORWARD);
+  if (ierr) {
+    VecScatterDestroy(&scatter);
+    VecDestroy(&x_seq);
+    throw std::runtime_error("Failed to complete PETSc solution gather");
+  }
+
+  const PetscScalar* px = nullptr;
+  ierr = VecGetArrayRead(x_seq, &px);
+  if (ierr) {
+    VecScatterDestroy(&scatter);
+    VecDestroy(&x_seq);
+    throw std::runtime_error("Failed to access gathered PETSc solution");
   }
 
   x.setZero();
@@ -440,9 +519,11 @@ void PetscGMRESLinearSolver::solve(
     x[i] = static_cast<double>(px[i]);
   }
 
-  ierr = VecRestoreArrayRead(x_, &px);
+  ierr = VecRestoreArrayRead(x_seq, &px);
+  VecScatterDestroy(&scatter);
+  VecDestroy(&x_seq);
   if (ierr) {
-    throw std::runtime_error("Failed to restore PETSc solution vector");
+    throw std::runtime_error("Failed to restore gathered PETSc solution");
   }
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES

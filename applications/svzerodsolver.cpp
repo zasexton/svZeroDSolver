@@ -7,6 +7,10 @@
 #include <fstream>
 
 #include "Solver.h"
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#include <petscsys.h>
+#endif
 
 /**
  *
@@ -58,9 +62,6 @@ int main(int argc, char* argv[]) {
     }
 
     output_file_name = output_file_path + "/output.csv";
-    std::cout << "[svzerodsolver] Output will be written to '"
-              << output_file_name << "'." << std::endl;
-    ;
   }
 
   std::ifstream input_file(input_file_name);
@@ -85,8 +86,54 @@ int main(int argc, char* argv[]) {
   }
 
   auto solver = Solver(config);
+
+#ifdef SVZERODSOLVER_LINEAR_SOLVER_NAME
+  DEBUG_MSG("Using linear solver: " << SVZERODSOLVER_LINEAR_SOLVER_NAME);
+#else
+  DEBUG_MSG("Using linear solver: <unknown>");
+#endif
+
   solver.run();
-  solver.write_result_to_csv(output_file_name);
+
+  auto detect_mpi_rank = []() -> std::pair<bool, int> {
+    int rank = 0;
+    bool active = false;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    PetscBool petsc_init = PETSC_FALSE;
+    if (PetscInitialized(&petsc_init) == 0 && petsc_init) {
+      MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+      active = true;
+    } else {
+      int mpi_init = 0;
+      MPI_Initialized(&mpi_init);
+      if (mpi_init) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        active = true;
+      }
+    }
+#endif
+    if (!active) {
+      if (const char* env_rank = std::getenv("OMPI_COMM_WORLD_RANK")) {
+        rank = std::atoi(env_rank);
+        active = true;
+      } else if (const char* env_rank = std::getenv("PMI_RANK")) {
+        rank = std::atoi(env_rank);
+        active = true;
+      } else if (const char* env_rank = std::getenv("MPI_RANK")) {
+        rank = std::atoi(env_rank);
+        active = true;
+      }
+    }
+    return {active, rank};
+  };
+
+  auto [mpi_active, mpi_rank] = detect_mpi_rank();
+  if (!mpi_active || mpi_rank == 0) {
+    std::cout << "[svzerodsolver] Output will be written to '"
+              << output_file_name << "'." << std::endl;
+    solver.write_result_to_csv(output_file_name);
+  }
 
   return 0;
 }

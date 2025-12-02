@@ -173,6 +173,9 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
     set(SVZERODSOLVER_PETSC_INSTALL_DIR
         ${SVZERODSOLVER_PETSC_PREFIX}/install
         CACHE PATH "Install directory for the internally built PETSc" FORCE)
+    set(SVZERODSOLVER_PETSC_CONFIGURE_OPTIONS ""
+        CACHE STRING
+        "Extra options (semicolon-separated) appended to the bundled PETSc configure command")
 
     ExternalProject_Add(petsc_ep
       PREFIX          ${SVZERODSOLVER_PETSC_PREFIX}
@@ -188,6 +191,7 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
           --with-shared-libraries=1
           --with-mpi=0
           --download-f2cblaslapack=1
+          ${SVZERODSOLVER_PETSC_CONFIGURE_OPTIONS}
       BUILD_COMMAND
         ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>
         ${CMAKE_MAKE_PROGRAM} PETSC_DIR=<SOURCE_DIR> PETSC_ARCH=arch-linux-c-opt all
@@ -208,6 +212,44 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS})
   target_link_libraries(${lib} PUBLIC ${PETSC_LIBRARIES})
   target_compile_definitions(${lib} PUBLIC SVZERODSOLVER_HAVE_PETSC)
+
+  # If PETSc was built with MPI (not mpiuni), pull in MPI so petsc*.h can find
+  # mpi.h and the PETSc library can link its MPI dependencies.
+  set(_svzero_petscconf_header "")
+  foreach(_inc ${PETSC_INCLUDE_DIRS})
+    if(EXISTS "${_inc}/petscconf.h")
+      set(_svzero_petscconf_header "${_inc}/petscconf.h")
+      break()
+    endif()
+  endforeach()
+
+  if(_svzero_petscconf_header)
+    file(STRINGS "${_svzero_petscconf_header}" _svzero_petsc_have_mpiuni
+         REGEX "^#define PETSC_HAVE_MPIUNI 1")
+  endif()
+
+  # Default: assume PETSc without MPI unless proven otherwise.
+  set(SVZERODSOLVER_PETSC_WITH_MPI FALSE PARENT_SCOPE)
+
+  if(_svzero_petscconf_header AND NOT _svzero_petsc_have_mpiuni)
+    find_path(SVZERODSOLVER_MPI_INCLUDE mpi.h
+      HINTS ENV MPI_HOME ENV MPIROOT ENV I_MPI_ROOT
+      PATHS /usr/lib/x86_64-linux-gnu/openmpi/include
+            /usr/lib/openmpi/include
+            /usr/local/include
+            /usr/include
+      PATH_SUFFIXES include include/openmpi)
+    if(NOT SVZERODSOLVER_MPI_INCLUDE)
+      message(FATAL_ERROR
+        "PETSc was built with MPI support, but mpi.h was not found. "
+        "Install MPI development headers (e.g., openmpi-dev or mpich) or "
+        "set MPI_HOME to your MPI installation.")
+    endif()
+    target_include_directories(${lib} PUBLIC ${SVZERODSOLVER_MPI_INCLUDE})
+    # Link against MPI explicitly (PETSc was built with MPI).
+    target_link_libraries(${lib} PUBLIC mpi)
+    set(SVZERODSOLVER_PETSC_WITH_MPI TRUE PARENT_SCOPE)
+  endif()
 
   # Propagate PETSc availability and link information to parent scope so that
   # final executables/modules can link against PETSc as well. Note that link

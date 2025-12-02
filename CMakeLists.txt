@@ -255,6 +255,21 @@ if(SVZERODSOLVER_HAVE_PETSC)
   target_link_libraries(svzerodcalibrator PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
   target_link_libraries(pysvzerod         PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
 endif()
+if(SVZERODSOLVER_PETSC_WITH_MPI)
+  target_link_libraries(svzerodsolver     PRIVATE mpi)
+  target_link_libraries(svzerodcalibrator PRIVATE mpi)
+  target_link_libraries(pysvzerod         PRIVATE mpi)
+endif()
+
+# Expose the chosen linear solver name to all application targets for logging.
+if(SVZERODSOLVER_LINEAR_SOLVER)
+  target_compile_definitions(svzerodsolver PRIVATE
+    SVZERODSOLVER_LINEAR_SOLVER_NAME=\"${SVZERODSOLVER_LINEAR_SOLVER}\")
+  target_compile_definitions(svzerodcalibrator PRIVATE
+    SVZERODSOLVER_LINEAR_SOLVER_NAME=\"${SVZERODSOLVER_LINEAR_SOLVER}\")
+  target_compile_definitions(pysvzerod PRIVATE
+    SVZERODSOLVER_LINEAR_SOLVER_NAME=\"${SVZERODSOLVER_LINEAR_SOLVER}\")
+endif()
 
 
 # Create distribution
