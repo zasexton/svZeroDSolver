@@ -28,4 +28,3 @@ target_include_directories(${lib} PUBLIC
 
 target_link_libraries( ${lib} Eigen3::Eigen )
 target_link_libraries( ${lib} nlohmann_json::nlohmann_json )
-
