@@ -484,46 +484,38 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error(oss.str());
   }
 
-  // Gather the distributed solution onto all ranks so downstream code can
-  // continue to treat x as replicated.
-  VecScatter scatter = nullptr;
-  Vec x_seq = nullptr;
-  ierr = VecScatterCreateToAll(x_, &scatter, &x_seq);
-  if (ierr) {
-    throw std::runtime_error("Failed to create PETSc scatter to gather solution");
-  }
-
-  ierr = VecScatterBegin(scatter, x_, x_seq, INSERT_VALUES, SCATTER_FORWARD);
-  if (ierr) {
-    VecScatterDestroy(&scatter);
-    VecDestroy(&x_seq);
-    throw std::runtime_error("Failed to begin PETSc solution gather");
-  }
-  ierr = VecScatterEnd(scatter, x_, x_seq, INSERT_VALUES, SCATTER_FORWARD);
-  if (ierr) {
-    VecScatterDestroy(&scatter);
-    VecDestroy(&x_seq);
-    throw std::runtime_error("Failed to complete PETSc solution gather");
-  }
-
+  // Gather distributed solution onto all ranks with MPI_Allgatherv to avoid
+  // creating an extra sequential PETSc vector on each rank.
   const PetscScalar* px = nullptr;
-  ierr = VecGetArrayRead(x_seq, &px);
+  ierr = VecGetArrayRead(x_, &px);
   if (ierr) {
-    VecScatterDestroy(&scatter);
-    VecDestroy(&x_seq);
-    throw std::runtime_error("Failed to access gathered PETSc solution");
+    throw std::runtime_error("Failed to access PETSc solution vector");
+  }
+
+  int comm_size = 1;
+  int comm_rank = 0;
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+  MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+
+  const PetscInt local_n = rend_ - rstart_;
+  std::vector<int> counts(comm_size, 0);
+  std::vector<int> displs(comm_size, 0);
+  MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT,
+                PETSC_COMM_WORLD);
+  int total = 0;
+  for (int i = 0; i < comm_size; ++i) {
+    displs[i] = total;
+    total += counts[i];
   }
 
   x.setZero();
-  for (PetscInt i = 0; i < n_; ++i) {
-    x[i] = static_cast<double>(px[i]);
-  }
+  MPI_Allgatherv(const_cast<PetscScalar*>(px), local_n, MPI_DOUBLE,
+                 x.data(), counts.data(), displs.data(), MPI_DOUBLE,
+                 PETSC_COMM_WORLD);
 
-  ierr = VecRestoreArrayRead(x_seq, &px);
-  VecScatterDestroy(&scatter);
-  VecDestroy(&x_seq);
+  ierr = VecRestoreArrayRead(x_, &px);
   if (ierr) {
-    throw std::runtime_error("Failed to restore gathered PETSc solution");
+    throw std::runtime_error("Failed to restore PETSc solution vector");
   }
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
