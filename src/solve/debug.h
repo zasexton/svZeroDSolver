@@ -13,6 +13,9 @@
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
+#endif
+
+#if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
 
@@ -32,6 +35,10 @@ inline bool debug_should_print() {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
     return rank == 0;
   }
+#endif
+
+  // If MPI headers are available, probe MPI directly (works once MPI_Init has run).
+#ifdef MPI_VERSION
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
@@ -39,18 +46,9 @@ inline bool debug_should_print() {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     return rank == 0;
   }
-  if (const char* env_rank = std::getenv("OMPI_COMM_WORLD_RANK")) {
-    return std::atoi(env_rank) == 0;
-  }
-  if (const char* env_rank = std::getenv("PMI_RANK")) {
-    return std::atoi(env_rank) == 0;
-  }
-  if (const char* env_rank = std::getenv("MPI_RANK")) {
-    return std::atoi(env_rank) == 0;
-  }
 #endif
 
-  // Even without PETSc/MPI headers, best effort based on common MPI env vars.
+  // Best effort based on common MPI/launcher env vars (works before MPI_Init).
   if (const char* env_rank = std::getenv("OMPI_COMM_WORLD_RANK")) {
     return std::atoi(env_rank) == 0;
   }
@@ -58,6 +56,12 @@ inline bool debug_should_print() {
     return std::atoi(env_rank) == 0;
   }
   if (const char* env_rank = std::getenv("MPI_RANK")) {
+    return std::atoi(env_rank) == 0;
+  }
+  if (const char* env_rank = std::getenv("PMIX_RANK")) {
+    return std::atoi(env_rank) == 0;
+  }
+  if (const char* env_rank = std::getenv("SLURM_PROCID")) {
     return std::atoi(env_rank) == 0;
   }
 
