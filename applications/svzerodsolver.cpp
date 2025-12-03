@@ -42,6 +42,7 @@ int main(int argc, char* argv[]) {
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (!mpi_initialized) {
+    DEBUG_MSG("svzerodsolver - calling MPI_Init");
     MPI_Init(&argc, &argv);
   }
 #endif
@@ -95,9 +96,12 @@ int main(int argc, char* argv[]) {
   int mpi_rank = 0;
   MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank);
   is_root = (mpi_rank == 0);
+  DEBUG_MSG("svzerodsolver - MPI rank " << mpi_rank
+                                        << " (is_root=" << (is_root ? "true" : "false") << ")");
 #endif
 
   if (is_root) {
+    DEBUG_MSG("svzerodsolver - root parsing JSON config");
     try {
       config = nlohmann::json::parse(input_file);
     } catch (const nlohmann::json::parse_error& e) {

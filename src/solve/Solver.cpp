@@ -16,6 +16,8 @@ Solver::Solver(const nlohmann::json& config) : Solver(config, true) {}
 
 Solver::Solver(const nlohmann::json& config, bool is_root)
     : is_root_(is_root) {
+  DEBUG_MSG("Solver::Solver - begin, is_root=" << (is_root_ ? "true" : "false"));
+
   if (is_root_) {
     validate_input(config);
     DEBUG_MSG("Read simulation parameters");
@@ -23,6 +25,8 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
     DEBUG_MSG("Load model");
     this->model = std::shared_ptr<Model>(new Model());
     load_simulation_model(config, *this->model.get());
+    DEBUG_MSG("Model loaded: num_blocks=" << this->model->get_num_blocks()
+                                          << ", dofs=" << this->model->dofhandler.size());
 
     // If period isn't specified anywhere, set to 1
     if (simparams.sim_cardiac_period < 0 &&
@@ -68,6 +72,12 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
     }
 
     sanity_checks();
+    DEBUG_MSG("Simulation parameters: pts_per_cycle="
+              << simparams.sim_pts_per_cycle
+              << ", num_time_steps=" << simparams.sim_num_time_steps
+              << ", steady_initial=" << (simparams.sim_steady_initial ? "true" : "false")
+              << ", use_cycle_to_cycle_error="
+              << (simparams.use_cycle_to_cycle_error ? "true" : "false"));
   }
 
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
@@ -75,10 +85,20 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
   // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
   MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
             PETSC_COMM_WORLD);
+  if (!is_root_) {
+    DEBUG_MSG("Solver::Solver - non-root received simparams: pts_per_cycle="
+              << simparams.sim_pts_per_cycle
+              << ", num_time_steps=" << simparams.sim_num_time_steps);
+  }
 #endif
+
+  DEBUG_MSG("Solver::Solver - end");
 }
 
 void Solver::setup_initial() {
+  DEBUG_MSG("Solver::setup_initial - begin, steady_initial="
+            << (simparams.sim_steady_initial ? "true" : "false")
+            << ", is_root=" << (is_root_ ? "true" : "false"));
   state = initial_state;
 
   // Create steady initial condition (root rank only when using PETSc GMRES).
@@ -107,14 +127,15 @@ void Solver::setup_initial() {
   // Use the initial condition (steady or user-provided) to set up parameters
   // which depend on the initial condition (root rank only).
   if (is_root_ && this->model) {
+    DEBUG_MSG("Solver::setup_initial - calling setup_initial_state_dependent_parameters");
     this->model->setup_initial_state_dependent_parameters(state);
   }
-  DEBUG_MSG("Setup initial");
+  DEBUG_MSG("Solver::setup_initial - end");
 }
 
 void Solver::setup_integrator() {
   // Set-up integrator
-  DEBUG_MSG("Setup time integration");
+  DEBUG_MSG("Solver::setup_integrator - begin");
   int system_size = state.y.size();
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
@@ -127,6 +148,9 @@ void Solver::setup_integrator() {
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
                           simparams.sim_nliter);
 #endif
+  DEBUG_MSG("Solver::setup_integrator - system_size=" << system_size
+                                                      << ", time_step_size="
+                                                      << simparams.sim_time_step_size);
 
   // Initialize loop
   states = std::vector<State>();
@@ -149,7 +173,9 @@ void Solver::setup_integrator() {
 
 void Solver::run_integration() {
   // Run integrator
-  DEBUG_MSG("Run time integration");
+  DEBUG_MSG("Solver::run_integration - begin, num_time_steps="
+            << simparams.sim_num_time_steps
+            << ", pts_per_cycle=" << simparams.sim_pts_per_cycle);
   int interval_counter = 0;
   int start_last_cycle =
       simparams.sim_num_time_steps - simparams.sim_pts_per_cycle;

@@ -51,6 +51,7 @@ void ensure_petsc_initialized() {
   };
 
   if (!initialized) {
+    DEBUG_MSG("ensure_petsc_initialized - calling PetscInitialize");
     PetscErrorCode ierr = PetscInitialize(nullptr, nullptr, nullptr, nullptr);
     if (ierr) {
       throw std::runtime_error("Failed to initialize PETSc");
@@ -250,9 +251,11 @@ void BiCGSTABLinearSolver::solve(
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 PetscGMRESLinearSolver::PetscGMRESLinearSolver() {
   ensure_petsc_initialized();
+  DEBUG_MSG("PetscGMRESLinearSolver::PetscGMRESLinearSolver - created");
 }
 
 PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
+  DEBUG_MSG("PetscGMRESLinearSolver::~PetscGMRESLinearSolver - destroying");
   if (scatter_to_root_ != nullptr) {
     VecScatterDestroy(&scatter_to_root_);
   }
@@ -283,6 +286,7 @@ void PetscGMRESLinearSolver::analyze_pattern(
   }
   MPI_Bcast(&n_global, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
   n_ = n_global;
+  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - global size n_=" << n_);
 
   if (A_ != nullptr) {
     MatDestroy(&A_);
@@ -323,6 +327,8 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (ierr) {
     throw std::runtime_error("Failed to query PETSc matrix ownership range");
   }
+  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - ownership range ["
+            << rstart_ << ", " << rend_ << ")");
 
   // Report communicator size and matrix type once (rank 0) for debugging.
   static bool reported_parallel_config = false;
@@ -408,10 +414,12 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc VecScatter to root");
   }
+  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - VecScatter to root created");
 }
 
 void PetscGMRESLinearSolver::factorize(
     const Eigen::SparseMatrix<double>& A) {
+  DEBUG_MSG("PetscGMRESLinearSolver::factorize - begin");
   if (A_ == nullptr || ksp_ == nullptr) {
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
@@ -465,11 +473,13 @@ void PetscGMRESLinearSolver::factorize(
   if (ierr) {
     throw std::runtime_error("Failed to apply PETSc KSP options");
   }
+  DEBUG_MSG("PetscGMRESLinearSolver::factorize - end");
 }
 
 void PetscGMRESLinearSolver::solve(
     const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
     Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
+  DEBUG_MSG("PetscGMRESLinearSolver::solve - begin");
   if (ksp_ == nullptr || x_ == nullptr || b_ == nullptr) {
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
@@ -563,6 +573,7 @@ void PetscGMRESLinearSolver::solve(
       throw std::runtime_error("Failed to restore PETSc sequential solution");
     }
   }
+  DEBUG_MSG("PetscGMRESLinearSolver::solve - end");
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
