@@ -7,6 +7,30 @@
 
 #include "SimulationParameters.h"
 
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#include <petscsys.h>
+#if __has_include(<mpi.h>)
+#include <mpi.h>
+#endif
+namespace {
+inline bool interface_is_root_rank() {
+#ifdef MPI_VERSION
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (!mpi_initialized) {
+    return true;
+  }
+  int rank = 0;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  return rank == 0;
+#else
+  return true;
+#endif
+}
+}  // namespace
+#endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
+
 // Static member data.
 int SolverInterface::problem_id_count_ = 0;
 std::map<int, SolverInterface*> SolverInterface::interface_list_;
@@ -82,49 +106,71 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   auto interface = new SolverInterface(input_file);
   problem_id = interface->problem_id_;
   DEBUG_MSG("[initialize] problem_id: " << problem_id);
+  bool is_root = true;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  is_root = interface_is_root_rank();
+#endif
 
-  // Create configuration reader.
-  std::ifstream ifs(input_file);
-  const auto& config = nlohmann::json::parse(ifs);
-  auto simparams = load_simulation_params(config);
+  SimulationParameters simparams{};
+  std::shared_ptr<Model> model;
+  State state;
+  int system_size = 0;
 
-  auto model = std::shared_ptr<Model>(new Model());
+  // Root rank parses the JSON configuration and builds the model.
+  if (is_root) {
+    std::ifstream ifs(input_file);
+    const auto& config = nlohmann::json::parse(ifs);
+    simparams = load_simulation_params(config);
 
-  load_simulation_model(config, *model.get());
-  auto state = load_initial_condition(config, *model.get());
+    model = std::shared_ptr<Model>(new Model());
 
-  // Check that steady initial is not set when ClosedLoopHeartAndPulmonary is
-  // used
-  if ((simparams.sim_steady_initial == true) && (model->has_block("CLH"))) {
-    std::runtime_error(
-        "ERROR: Steady initial condition is not compatible with "
-        "ClosedLoopHeartAndPulmonary block.");
+    load_simulation_model(config, *model.get());
+    state = load_initial_condition(config, *model.get());
+
+    // Check that steady initial is not set when ClosedLoopHeartAndPulmonary is
+    // used
+    if ((simparams.sim_steady_initial == true) && (model->has_block("CLH"))) {
+      std::runtime_error(
+          "ERROR: Steady initial condition is not compatible with "
+          "ClosedLoopHeartAndPulmonary block.");
+    }
+
+    // Set default cardiac cycle period if not set by model
+    if (model->cardiac_cycle_period < 0.0) {
+      model->cardiac_cycle_period =
+          1.0;  // If it has not been read from config or Parameter
+                // yet, set as default value of 1.0
+    }
+
+    // Calculate time step size
+    if (!simparams.sim_coupled) {
+      simparams.sim_time_step_size =
+          model->cardiac_cycle_period /
+          (double(simparams.sim_pts_per_cycle) - 1.0);
+    } else {
+      simparams.sim_time_step_size =
+          simparams.sim_external_step_size /
+          (double(simparams.sim_num_time_steps) - 1.0);
+    }
+
+    system_size = model->dofhandler.size();
+
+    // Create a vector containing all block names (only needed on root).
+    for (size_t i = 0; i < model->get_num_blocks(); i++) {
+      block_names.push_back(model->get_block(i)->get_name());
+    }
+    variable_names = model->dofhandler.variables;
   }
 
-  // Set default cardiac cycle period if not set by model
-  if (model->cardiac_cycle_period < 0.0) {
-    model->cardiac_cycle_period =
-        1.0;  // If it has not been read from config or Parameter
-              // yet, set as default value of 1.0
-  }
-
-  // Calculate time step size
-  if (!simparams.sim_coupled) {
-    simparams.sim_time_step_size = model->cardiac_cycle_period /
-                                   (double(simparams.sim_pts_per_cycle) - 1.0);
-  } else {
-    simparams.sim_time_step_size = simparams.sim_external_step_size /
-                                   (double(simparams.sim_num_time_steps) - 1.0);
-  }
-
-  // Create a model.
-  interface->model_ = model;
-
-  // Create a vector containing all block names
-  for (size_t i = 0; i < model->get_num_blocks(); i++) {
-    block_names.push_back(model->get_block(i)->get_name());
-  }
-  variable_names = model->dofhandler.variables;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // Broadcast simulation parameters and system size to all ranks so that they
+  // do not need to parse the JSON or build the Model.
+  MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
+            PETSC_COMM_WORLD);
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+#endif
 
   // Get simulation parameters
   interface->time_step_size_ = simparams.sim_time_step_size;
@@ -132,7 +178,7 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   interface->max_nliter_ = simparams.sim_nliter;
   interface->absolute_tolerance_ = simparams.sim_abs_tol;
   interface->time_step_ = 0;
-  interface->system_size_ = model->dofhandler.size();
+  interface->system_size_ = system_size;
   interface->num_time_steps_ = simparams.sim_num_time_steps;
   interface->pts_per_cycle_ = simparams.sim_pts_per_cycle;
   pts_per_cycle = simparams.sim_pts_per_cycle;
@@ -159,8 +205,8 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   interface->num_output_steps_ = num_output_steps;
   DEBUG_MSG("[initialize] System size: " << interface->system_size_);
 
-  // Create steady initial state.
-  if (simparams.sim_steady_initial) {
+  // Create steady initial state (root rank only).
+  if (simparams.sim_steady_initial && is_root) {
     DEBUG_MSG("[initialize] ----- Calculating steady initial condition ----- ");
     double time_step_size_steady = model->cardiac_cycle_period / 10.0;
     DEBUG_MSG("[initialize] Create steady model ... ");
@@ -168,8 +214,9 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     auto model_steady = model;
     model_steady->to_steady();
     Integrator integrator_steady(
-        model_steady.get(), time_step_size_steady, interface->rho_infty_,
-        interface->absolute_tolerance_, interface->max_nliter_);
+        model_steady.get(), interface->system_size_, time_step_size_steady,
+        interface->rho_infty_, interface->absolute_tolerance_,
+        interface->max_nliter_);
 
     for (size_t i = 0; i < 31; i++) {
       state = integrator_steady.step(state, time_step_size_steady * double(i));
@@ -177,16 +224,48 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     model_steady->to_unsteady();
   }
 
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // Broadcast initial (possibly steady) state to all ranks.
+  if (!is_root) {
+    state = State(interface->system_size_);
+  }
+  MPI_Bcast(state.y.data(),
+            interface->system_size_,
+            MPI_DOUBLE,
+            0,
+            PETSC_COMM_WORLD);
+  MPI_Bcast(state.ydot.data(),
+            interface->system_size_,
+            MPI_DOUBLE,
+            0,
+            PETSC_COMM_WORLD);
+#endif
+
   interface->state_ = state;
 
   // Initialize states and times vectors because size is now known
   interface->times_.resize(num_output_steps);
   interface->states_.resize(num_output_steps);
 
-  // Initialize integrator
+  // Initialize integrator: only the root rank owns the Model, but all ranks
+  // participate in PETSc solves.
+  if (is_root) {
+    interface->model_ = model;
+  }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  interface->integrator_ =
+      Integrator(is_root ? model.get() : nullptr,
+                 interface->system_size_, interface->time_step_size_,
+                 interface->rho_infty_, interface->absolute_tolerance_,
+                 interface->max_nliter_);
+#else
+  interface->model_ = model;
   interface->integrator_ =
       Integrator(model.get(), interface->time_step_size_, interface->rho_infty_,
                  interface->absolute_tolerance_, interface->max_nliter_);
+#endif
 
   DEBUG_MSG("[initialize] Done");
 }
@@ -403,8 +482,18 @@ void increment_time(int problem_id, const double external_time,
   auto time_step_size = interface->time_step_size_;
   auto absolute_tolerance = interface->absolute_tolerance_;
   auto max_nliter = interface->max_nliter_;
+  int system_size = interface->system_size_;
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  bool is_root = interface_is_root_rank();
+  Integrator integrator(is_root ? model.get() : nullptr,
+                        system_size, time_step_size, interface->rho_infty_,
+                        absolute_tolerance, max_nliter);
+#else
   Integrator integrator(model.get(), time_step_size, interface->rho_infty_,
                         absolute_tolerance, max_nliter);
+#endif
   auto state = interface->state_;
   interface->state_ = integrator.step(state, external_time);
   interface->time_step_ += 1;
@@ -440,7 +529,12 @@ void run_simulation(int problem_id, const double external_time,
   auto num_output_steps = interface->num_output_steps_;
 
   auto integrator = interface->integrator_;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   integrator.update_params(time_step_size);
+#else
+  integrator.update_params(time_step_size);
+#endif
 
   auto state = interface->state_;
   double time = external_time;

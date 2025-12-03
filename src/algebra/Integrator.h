@@ -56,6 +56,23 @@ class Integrator {
              int max_iter);
 
   /**
+   * @brief Construct a new Integrator object with an explicit system size.
+   *
+   * This overload is useful when only a single MPI rank owns the Model, but
+   * all ranks must participate in the PETSc-based linear solves.
+   *
+   * @param model Pointer to the model on the root rank (may be nullptr on
+   * non-root ranks when using PETSc GMRES)
+   * @param system_size Size of the linear system
+   * @param time_step_size Time step size for generalized-alpha step
+   * @param rho Spectral radius for generalized-alpha step
+   * @param atol Absolut tolerance for non-linear iteration termination
+   * @param max_iter Maximum number of non-linear iterations
+   */
+  Integrator(Model* model, int system_size, double time_step_size, double rho,
+             double atol, int max_iter);
+
+  /**
    * @brief Construct a new Integrator object
    *
    */

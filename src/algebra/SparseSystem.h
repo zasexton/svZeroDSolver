@@ -175,9 +175,11 @@ class PetscGMRESLinearSolver : public LinearSolver {
  private:
   Mat A_ = nullptr;
   KSP ksp_ = nullptr;
- Vec x_ = nullptr;
- Vec b_ = nullptr;
- PetscInt n_ = 0;
+  Vec x_ = nullptr;
+  Vec b_ = nullptr;
+  Vec x_seq_ = nullptr;
+  VecScatter scatter_to_root_ = nullptr;
+  PetscInt n_ = 0;
   PetscInt rstart_ = 0;
   PetscInt rend_ = 0;
 };

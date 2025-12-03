@@ -3,9 +3,42 @@
 
 #include "Integrator.h"
 
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#include <petscsys.h>
+#if __has_include(<mpi.h>)
+#include <mpi.h>
+#endif
+namespace {
+inline bool integrator_is_root_rank() {
+#ifdef MPI_VERSION
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (!mpi_initialized) {
+    return true;
+  }
+  int rank = 0;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  return rank == 0;
+#else
+  return true;
+#endif
+}
+}  // namespace
+#endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
+
 Integrator::Integrator(Model* model, double time_step_size, double rho,
                        double atol, int max_iter)
-    : system(SparseSystem(model->dofhandler.size())), model(model) {
+    : Integrator(model,
+                 model ? model->dofhandler.size() : 0,
+                 time_step_size,
+                 rho,
+                 atol,
+                 max_iter) {}
+
+Integrator::Integrator(Model* model, int system_size, double time_step_size,
+                       double rho, double atol, int max_iter)
+    : system(SparseSystem(system_size)), model(model) {
   alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho);
   alpha_f = 1.0 / (1.0 + rho);
   gamma = 0.5 + alpha_m - alpha_f;
@@ -14,7 +47,7 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
   y_coeff = gamma * time_step_size;
   y_coeff_jacobian = alpha_f * y_coeff;
 
-  size = model->dofhandler.size();
+  size = system_size;
   this->time_step_size = time_step_size;
   this->atol = atol;
   this->max_iter = max_iter;
@@ -41,21 +74,41 @@ void Integrator::update_params(double time_step_size) {
   this->time_step_size = time_step_size;
   y_coeff = gamma * time_step_size;
   y_coeff_jacobian = alpha_f * y_coeff;
-  model->update_constant(system);
-  model->update_time(system, 0.0);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  const bool is_root = integrator_is_root_rank();
+  if (!is_root || model == nullptr) {
+    return;
+  }
+#endif
+  if (model) {
+    model->update_constant(system);
+    model->update_time(system, 0.0);
+  }
 }
 
 State Integrator::step(const State& old_state, double time) {
   // Predictor: Constant y, consistent ydot
   State new_state = State::Zero(size);
-  new_state.ydot += old_state.ydot * ydot_init_coeff;
-  new_state.y += old_state.y;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  const bool is_root = integrator_is_root_rank();
+#else
+  const bool is_root = true;
+#endif
+
+  if (is_root) {
+    new_state.ydot += old_state.ydot * ydot_init_coeff;
+    new_state.y += old_state.y;
+  }
 
   // Determine new time (evaluate terms at generalized mid-point)
   double new_time = time + alpha_f * time_step_size;
 
   // Evaluate time-dependent element contributions in system
-  model->update_time(system, new_time);
+  if (is_root) {
+    model->update_time(system, new_time);
+  }
 
   // Count total number of step calls
   n_iter++;
@@ -65,17 +118,28 @@ State Integrator::step(const State& old_state, double time) {
     // Initiator: Evaluate the iterates at the intermediate time levels
     ydot_am.setZero();
     y_af.setZero();
-    ydot_am += old_state.ydot + (new_state.ydot - old_state.ydot) * alpha_m;
-    y_af += old_state.y + (new_state.y - old_state.y) * alpha_f;
+    if (is_root) {
+      ydot_am += old_state.ydot +
+                 (new_state.ydot - old_state.ydot) * alpha_m;
+      y_af += old_state.y + (new_state.y - old_state.y) * alpha_f;
 
-    // Update solution-dependent element contribitions
-    model->update_solution(system, y_af, ydot_am);
+      // Update solution-dependent element contributions
+      model->update_solution(system, y_af, ydot_am);
 
-    // Evaluate residual
-    system.update_residual(y_af, ydot_am);
+      // Evaluate residual
+      system.update_residual(y_af, ydot_am);
+    }
 
-    // Check termination criterium
-    if (system.residual.cwiseAbs().maxCoeff() < atol) {
+    // Check termination criterium (based on residual on the root rank).
+    double max_residual = 0.0;
+    if (is_root) {
+      max_residual = system.residual.cwiseAbs().maxCoeff();
+    }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    MPI_Bcast(&max_residual, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
+#endif
+    if (max_residual < atol) {
       break;
     }
 
@@ -93,15 +157,32 @@ State Integrator::step(const State& old_state, double time) {
     system.solve();
 
     // Perform post-solve actions on blocks
-    model->post_solve(new_state.y);
+    if (is_root) {
+      model->post_solve(new_state.y);
 
-    // Update the solution
-    new_state.ydot += system.dydot;
-    new_state.y += system.dydot * y_coeff;
-
-    // Count total number of nonlinear iterations
-    n_nonlin_iter++;
+      // Update the solution on the root rank.
+      new_state.ydot += system.dydot;
+      new_state.y += system.dydot * y_coeff;
+      // Count total number of nonlinear iterations
+      n_nonlin_iter++;
+    }
   }
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // Broadcast the updated state from the root rank so that all ranks see a
+  // consistent state, while only the root performed the updates.
+  MPI_Bcast(new_state.y.data(),
+            static_cast<int>(new_state.y.size()),
+            MPI_DOUBLE,
+            0,
+            PETSC_COMM_WORLD);
+  MPI_Bcast(new_state.ydot.data(),
+            static_cast<int>(new_state.ydot.size()),
+            MPI_DOUBLE,
+            0,
+            PETSC_COMM_WORLD);
+#endif
 
   return new_state;
 }

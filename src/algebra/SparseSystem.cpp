@@ -24,6 +24,18 @@
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 namespace {
 
+// Return true on the rank that owns the global Eigen system (rank 0 in
+// PETSC_COMM_WORLD). If MPI is not yet initialized, treat the caller as root.
+bool is_root_rank() {
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  int rank = 0;
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+  return rank == 0;
+}
+
 // Ensure PETSc is initialized once per process.
 void ensure_petsc_initialized() {
   static bool initialized = false;
@@ -241,6 +253,12 @@ PetscGMRESLinearSolver::PetscGMRESLinearSolver() {
 }
 
 PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
+  if (scatter_to_root_ != nullptr) {
+    VecScatterDestroy(&scatter_to_root_);
+  }
+  if (x_seq_ != nullptr) {
+    VecDestroy(&x_seq_);
+  }
   if (x_ != nullptr) {
     VecDestroy(&x_);
   }
@@ -257,7 +275,14 @@ PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
 
 void PetscGMRESLinearSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& A) {
-  n_ = static_cast<PetscInt>(A.rows());
+  // Determine the global system size on the root rank and broadcast it to all
+  // ranks so that PETSc can create distributed objects consistently.
+  PetscInt n_global = 0;
+  if (is_root_rank()) {
+    n_global = static_cast<PetscInt>(A.rows());
+  }
+  MPI_Bcast(&n_global, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
+  n_ = n_global;
 
   if (A_ != nullptr) {
     MatDestroy(&A_);
@@ -274,6 +299,14 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (ksp_ != nullptr) {
     KSPDestroy(&ksp_);
     ksp_ = nullptr;
+  }
+  if (x_seq_ != nullptr) {
+    VecDestroy(&x_seq_);
+    x_seq_ = nullptr;
+  }
+  if (scatter_to_root_ != nullptr) {
+    VecScatterDestroy(&scatter_to_root_);
+    scatter_to_root_ = nullptr;
   }
 
   PetscErrorCode ierr;
@@ -296,7 +329,6 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (!reported_parallel_config) {
     int comm_size = 1;
     int comm_rank = 0;
-    const PetscMPIInt* petsc_comm_size = nullptr;
     /* Use PETSc introspection to avoid direct MPI dependency at link time. */
     MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
     MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
@@ -368,6 +400,14 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to set PETSc preconditioner type");
   }
 #endif
+
+  // Create a sequential vector and a scatter to gather the distributed
+  // solution onto the root rank only. VecScatterCreateToZero will allocate
+  // x_seq_ only on rank 0.
+  ierr = VecScatterCreateToZero(x_, &scatter_to_root_, &x_seq_);
+  if (ierr) {
+    throw std::runtime_error("Failed to create PETSc VecScatter to root");
+  }
 }
 
 void PetscGMRESLinearSolver::factorize(
@@ -382,17 +422,19 @@ void PetscGMRESLinearSolver::factorize(
     throw std::runtime_error("Failed to zero PETSc matrix");
   }
 
-  for (int k = 0; k < A.outerSize(); ++k) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
-      const PetscInt row = static_cast<PetscInt>(it.row());
-      const PetscInt col = static_cast<PetscInt>(it.col());
-      const PetscScalar val = static_cast<PetscScalar>(it.value());
-      // Only insert rows owned by this rank to avoid excessive off-rank traffic.
-      if (row >= rstart_ && row < rend_) {
+  // Only the root rank owns the global Eigen matrix. Insert its entries into
+  // the distributed PETSc matrix. Other ranks participate only in the
+  // collective assembly calls below.
+  if (is_root_rank()) {
+    for (int k = 0; k < A.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
+        const PetscInt row = static_cast<PetscInt>(it.row());
+        const PetscInt col = static_cast<PetscInt>(it.col());
+        const PetscScalar val = static_cast<PetscScalar>(it.value());
         ierr = MatSetValue(A_, row, col, val, INSERT_VALUES);
-      }
-      if (ierr) {
-        throw std::runtime_error("Failed to set PETSc matrix entry");
+        if (ierr) {
+          throw std::runtime_error("Failed to set PETSc matrix entry");
+        }
       }
     }
   }
@@ -437,8 +479,11 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error("Failed to zero PETSc RHS vector");
   }
 
-  for (PetscInt i = 0; i < n_; ++i) {
-    if (i >= rstart_ && i < rend_) {
+  // Only the root rank owns the global Eigen RHS. Insert its entries into the
+  // distributed PETSc RHS vector. Other ranks participate only in the
+  // collective assembly calls below.
+  if (is_root_rank()) {
+    for (PetscInt i = 0; i < n_; ++i) {
       ierr = VecSetValue(b_, i, static_cast<PetscScalar>(b[i]), INSERT_VALUES);
       if (ierr) {
         throw std::runtime_error("Failed to set PETSc RHS entry");
@@ -484,38 +529,39 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error(oss.str());
   }
 
-  // Gather distributed solution onto all ranks with MPI_Allgatherv to avoid
-  // creating an extra sequential PETSc vector on each rank.
-  const PetscScalar* px = nullptr;
-  ierr = VecGetArrayRead(x_, &px);
-  if (ierr) {
-    throw std::runtime_error("Failed to access PETSc solution vector");
+  // Scatter the distributed PETSc solution onto a sequential vector on the
+  // root rank only, then copy into the Eigen vector x on that rank.
+  if (scatter_to_root_ == nullptr || x_seq_ == nullptr) {
+    throw std::runtime_error("PETSc GMRES scatter to root not initialized");
   }
 
-  int comm_size = 1;
-  int comm_rank = 0;
-  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
-  MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
-
-  const PetscInt local_n = rend_ - rstart_;
-  std::vector<int> counts(comm_size, 0);
-  std::vector<int> displs(comm_size, 0);
-  MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT,
-                PETSC_COMM_WORLD);
-  int total = 0;
-  for (int i = 0; i < comm_size; ++i) {
-    displs[i] = total;
-    total += counts[i];
+  ierr = VecScatterBegin(scatter_to_root_, x_, x_seq_, INSERT_VALUES,
+                         SCATTER_FORWARD);
+  if (ierr) {
+    throw std::runtime_error("Failed to begin PETSc VecScatter to root");
+  }
+  ierr = VecScatterEnd(scatter_to_root_, x_, x_seq_, INSERT_VALUES,
+                       SCATTER_FORWARD);
+  if (ierr) {
+    throw std::runtime_error("Failed to end PETSc VecScatter to root");
   }
 
-  x.setZero();
-  MPI_Allgatherv(const_cast<PetscScalar*>(px), local_n, MPI_DOUBLE,
-                 x.data(), counts.data(), displs.data(), MPI_DOUBLE,
-                 PETSC_COMM_WORLD);
+  if (is_root_rank()) {
+    const PetscScalar* px = nullptr;
+    ierr = VecGetArrayRead(x_seq_, &px);
+    if (ierr) {
+      throw std::runtime_error("Failed to access PETSc sequential solution");
+    }
 
-  ierr = VecRestoreArrayRead(x_, &px);
-  if (ierr) {
-    throw std::runtime_error("Failed to restore PETSc solution vector");
+    x.resize(static_cast<Eigen::Index>(n_));
+    for (PetscInt i = 0; i < n_; ++i) {
+      x[static_cast<Eigen::Index>(i)] = static_cast<double>(px[i]);
+    }
+
+    ierr = VecRestoreArrayRead(x_seq_, &px);
+    if (ierr) {
+      throw std::runtime_error("Failed to restore PETSc sequential solution");
+    }
   }
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
@@ -602,15 +648,33 @@ std::shared_ptr<LinearSolver> make_default_linear_solver() {
 SparseSystem::SparseSystem() : solver(make_default_linear_solver()) {}
 
 SparseSystem::SparseSystem(int n) : solver(make_default_linear_solver()) {
-  F = Eigen::SparseMatrix<double>(n, n);
-  E = Eigen::SparseMatrix<double>(n, n);
-  dC_dy = Eigen::SparseMatrix<double>(n, n);
-  dC_dydot = Eigen::SparseMatrix<double>(n, n);
-  C = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  const bool is_root = is_root_rank();
+#else
+  const bool is_root = true;
+#endif
 
-  jacobian = Eigen::SparseMatrix<double>(n, n);
-  residual = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
-  dydot = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+  if (is_root) {
+    F = Eigen::SparseMatrix<double>(n, n);
+    E = Eigen::SparseMatrix<double>(n, n);
+    dC_dy = Eigen::SparseMatrix<double>(n, n);
+    dC_dydot = Eigen::SparseMatrix<double>(n, n);
+    C = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+
+    jacobian = Eigen::SparseMatrix<double>(n, n);
+    residual = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+    dydot = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+  } else {
+    F.resize(0, 0);
+    E.resize(0, 0);
+    dC_dy.resize(0, 0);
+    dC_dydot.resize(0, 0);
+    C.resize(0);
+    jacobian.resize(0, 0);
+    residual.resize(0);
+    dydot.resize(0);
+  }
 }
 
 SparseSystem::~SparseSystem() {}
@@ -622,36 +686,55 @@ void SparseSystem::clean() {
 }
 
 void SparseSystem::reserve(Model* model) {
-  auto num_triplets = model->get_num_triplets();
-  F.reserve(num_triplets.F);
-  E.reserve(num_triplets.E);
-  dC_dy.reserve(num_triplets.D);
-  dC_dydot.reserve(num_triplets.D);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  const bool is_root = is_root_rank();
+#else
+  const bool is_root = true;
+#endif
 
-  model->update_constant(*this);
-  model->update_time(*this, 0.0);
+  if (is_root) {
+    auto num_triplets = model->get_num_triplets();
+    F.reserve(num_triplets.F);
+    E.reserve(num_triplets.E);
+    dC_dy.reserve(num_triplets.D);
+    dC_dydot.reserve(num_triplets.D);
 
-  Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_y =
-      Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
+    model->update_constant(*this);
+    model->update_time(*this, 0.0);
 
-  Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_dy =
-      Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
+    Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_y =
+        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
 
-  model->update_solution(*this, dummy_y, dummy_dy);
+    Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_dy =
+        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
 
-  F.makeCompressed();
-  E.makeCompressed();
-  dC_dy.makeCompressed();
-  dC_dydot.makeCompressed();
-  jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
-  update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
-  jacobian.makeCompressed();
-  solver->analyze_pattern(jacobian);  // Let solver analyze pattern
+    model->update_solution(*this, dummy_y, dummy_dy);
+
+    F.makeCompressed();
+    E.makeCompressed();
+    dC_dy.makeCompressed();
+    dC_dydot.makeCompressed();
+    jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
+    update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
+    jacobian.makeCompressed();
+  }
+
+  // Let the solver analyze the sparsity pattern and set up any internal data
+  // structures. For the PETSc backend, this also creates the distributed
+  // PETSc objects on all ranks.
+  solver->analyze_pattern(jacobian);
 }
 
 void SparseSystem::update_residual(
     Eigen::Matrix<double, Eigen::Dynamic, 1>& y,
     Eigen::Matrix<double, Eigen::Dynamic, 1>& ydot) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  if (!is_root_rank()) {
+    return;
+  }
+#endif
   residual.setZero();
   residual -= C;
   residual.noalias() -= E * ydot;
@@ -660,6 +743,12 @@ void SparseSystem::update_residual(
 
 void SparseSystem::update_jacobian(double time_coeff_ydot,
                                    double time_coeff_y) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  if (!is_root_rank()) {
+    return;
+  }
+#endif
   jacobian.setZero();
   jacobian += (E + dC_dydot) * time_coeff_ydot;
   jacobian += (F + dC_dy) * time_coeff_y;
