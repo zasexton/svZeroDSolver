@@ -63,6 +63,9 @@ void ensure_petsc_initialized() {
     // of convergence and performance issues.
     PetscOptionsSetValue(nullptr, "-ksp_monitor", nullptr);
     PetscOptionsSetValue(nullptr, "-ksp_view", nullptr);
+    // Enable PETSc informational output as well so that setup/factorization
+    // progress is reported in real time.
+    PetscOptionsSetValue(nullptr, "-info", nullptr);
 #endif
 
     // Ensure PETSc is finalized on clean exit.
