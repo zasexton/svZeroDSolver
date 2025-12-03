@@ -79,11 +79,11 @@ int main(int argc, char* argv[]) {
 
   bool is_root = true;
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
-  // Determine if this rank is the root rank.
-  int mpi_rank = 0;
-  MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank);
-  is_root = (mpi_rank == 0);
-  DEBUG_MSG("svzerodsolver - MPI rank " << mpi_rank
+  // Determine if this rank is the root rank (rank 0 in MPI_COMM_WORLD).
+  int world_rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+  is_root = (world_rank == 0);
+  DEBUG_MSG("svzerodsolver - MPI rank " << world_rank
                                         << " (is_root=" << (is_root ? "true" : "false") << ")");
 #endif
   std::ifstream input_file(input_file_name);
@@ -141,19 +141,12 @@ int main(int argc, char* argv[]) {
   auto detect_mpi_rank = []() -> std::pair<bool, int> {
     int rank = 0;
     bool active = false;
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-    PetscBool petsc_init = PETSC_FALSE;
-    if (PetscInitialized(&petsc_init) == 0 && petsc_init) {
-      MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+#if defined(MPI_VERSION)
+    int mpi_init = 0;
+    MPI_Initialized(&mpi_init);
+    if (mpi_init) {
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
       active = true;
-    } else {
-      int mpi_init = 0;
-      MPI_Initialized(&mpi_init);
-      if (mpi_init) {
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        active = true;
-      }
     }
 #endif
     if (!active) {
@@ -171,8 +164,8 @@ int main(int argc, char* argv[]) {
     return {active, rank};
   };
 
-  auto [mpi_active, mpi_rank] = detect_mpi_rank();
-  if (!mpi_active || mpi_rank == 0) {
+  auto [mpi_active, out_rank] = detect_mpi_rank();
+  if (!mpi_active || out_rank == 0) {
     std::cout << "[svzerodsolver] Output will be written to '"
               << output_file_name << "'." << std::endl;
     solver.write_result_to_csv(output_file_name);
