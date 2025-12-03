@@ -256,6 +256,22 @@ if(SVZERODSOLVER_HAVE_PETSC)
   target_link_libraries(pysvzerod         PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
 endif()
 if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
+  # Ensure all relevant targets see the PetscGMRES compile-time definition,
+  # not just the algebra library. The SVZERODSOLVER_HAVE_PETSC definition is
+  # still provided by the algebra CMakeLists and is used there to include
+  # PETSc headers. Here we only need the linear-solver selector macro so that
+  # PetscGMRES-specific paths (e.g., streaming JSON loading, MPI debug
+  # handling) are enabled consistently across the solver, interface, and CLI
+  # binaries without forcing them to include PETSc headers directly.
+  foreach(_tgt svzerodsolver svzerodcalibrator pysvzerod
+               svzero_algebra_library svzero_model_library
+               svzero_solve_library svzero_interface)
+    if(TARGET ${_tgt})
+      target_compile_definitions(${_tgt} PRIVATE
+        SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    endif()
+  endforeach()
+
   if(SVZERODSOLVER_PETSC_WITH_MPI)
     # PETSc was configured with a real MPI implementation. Link the common MPI
     # libraries directly instead of relying on CMake's FindMPI, which can be

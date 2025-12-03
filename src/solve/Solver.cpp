@@ -5,8 +5,7 @@
 
 #include "csv_writer.h"
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif

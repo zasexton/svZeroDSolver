@@ -7,9 +7,7 @@
 #include <fstream>
 
 #include "Solver.h"
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-#include <petscsys.h>
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
@@ -36,8 +34,7 @@
 int main(int argc, char* argv[]) {
   DEBUG_MSG("Starting svZeroDSolver");
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Ensure MPI is initialized so that PETSc can use it and ranks can
   // coordinate before PETSc is first touched.
   int mpi_initialized = 0;
@@ -81,8 +78,7 @@ int main(int argc, char* argv[]) {
   }
 
   bool is_root = true;
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Determine if this rank is the root rank.
   int mpi_rank = 0;
   MPI_Comm_rank(PETSC_COMM_WORLD, &mpi_rank);
