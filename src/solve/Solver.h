@@ -43,6 +43,23 @@ class Solver {
    */
   Solver(const nlohmann::json& config, bool is_root);
 
+  /**
+   * @brief Construct a new Solver object from pre-parsed simulation parameters
+   *        and model state.
+   *
+   * This constructor is intended for use with streaming JSON parsing, where
+   * the full configuration is not held in memory as a single JSON DOM.
+   *
+   * @param simparams Simulation parameters
+   * @param model Shared pointer to the model (owned on the root rank)
+   * @param initial_state Initial state of the system
+   * @param is_root Whether this rank owns the Model
+   */
+  Solver(const SimulationParameters& simparams,
+         std::shared_ptr<Model> model,
+         const State& initial_state,
+         bool is_root);
+
   /// Set up and initialize the simulation parameters and model
   void setup_initial();
 

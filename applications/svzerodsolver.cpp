@@ -13,6 +13,7 @@
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
+#include "StreamingConfigLoader.h"
 #endif
 
 /**
@@ -79,16 +80,6 @@ int main(int argc, char* argv[]) {
     output_file_name = output_file_path + "/output.csv";
   }
 
-  std::ifstream input_file(input_file_name);
-
-  if (!input_file.is_open()) {
-    std::cerr << "[svzerodsolver] Error: The input file '" << input_file_name
-              << "' cannot be opened." << std::endl;
-    return 1;
-  }
-
-  nlohmann::json config;
-
   bool is_root = true;
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
@@ -99,7 +90,34 @@ int main(int argc, char* argv[]) {
   DEBUG_MSG("svzerodsolver - MPI rank " << mpi_rank
                                         << " (is_root=" << (is_root ? "true" : "false") << ")");
 #endif
+  std::ifstream input_file(input_file_name);
 
+  if (!input_file.is_open()) {
+    std::cerr << "[svzerodsolver] Error: The input file '" << input_file_name
+              << "' cannot be opened." << std::endl;
+    return 1;
+  }
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  SimulationParameters simparams;
+  std::shared_ptr<Model> model;
+  State initial_state;
+  if (is_root) {
+    DEBUG_MSG("svzerodsolver - root streaming JSON config");
+    model = std::make_shared<Model>();
+    try {
+      load_config_streaming(input_file, simparams, *model, initial_state);
+    } catch (const std::exception& e) {
+      std::cout << "[svzerodsolver] Error: Streaming parse of input file '"
+                << input_file_name << "' has failed." << std::endl;
+      std::cout << "[svzerodsolver] Details: " << e.what() << std::endl;
+      return 1;
+    }
+  }
+  auto solver = Solver(simparams, model, initial_state, is_root);
+#else
+  nlohmann::json config;
   if (is_root) {
     DEBUG_MSG("svzerodsolver - root parsing JSON config");
     try {
@@ -113,8 +131,8 @@ int main(int argc, char* argv[]) {
       return 1;
     }
   }
-
   auto solver = Solver(config, is_root);
+#endif
 
 #ifdef SVZERODSOLVER_LINEAR_SOLVER_NAME
   DEBUG_MSG("Using linear solver: " << SVZERODSOLVER_LINEAR_SOLVER_NAME);

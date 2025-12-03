@@ -95,6 +95,47 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
   DEBUG_MSG("Solver::Solver - end");
 }
 
+Solver::Solver(const SimulationParameters& simparams_in,
+               std::shared_ptr<Model> model_in,
+               const State& initial_state_in,
+               bool is_root)
+    : is_root_(is_root), model(std::move(model_in)) {
+  simparams = simparams_in;
+  initial_state = initial_state_in;
+
+  if (is_root_ && this->model) {
+    DEBUG_MSG("Solver::Solver(streaming) - root, dofs="
+              << this->model->dofhandler.size());
+  }
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
+  MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
+            PETSC_COMM_WORLD);
+  // Broadcast initial state so all ranks see the same starting point.
+  int system_size = 0;
+  if (is_root_) {
+    system_size = static_cast<int>(initial_state.y.size());
+  }
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+  if (!is_root_) {
+    initial_state = State(system_size);
+  }
+  if (system_size > 0) {
+    MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
+              PETSC_COMM_WORLD);
+    MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
+              PETSC_COMM_WORLD);
+  }
+  if (!is_root_) {
+    DEBUG_MSG("Solver::Solver(streaming) - non-root received simparams: "
+              "pts_per_cycle=" << simparams.sim_pts_per_cycle
+              << ", num_time_steps=" << simparams.sim_num_time_steps);
+  }
+#endif
+}
+
 void Solver::setup_initial() {
   DEBUG_MSG("Solver::setup_initial - begin, steady_initial="
             << (simparams.sim_steady_initial ? "true" : "false")
