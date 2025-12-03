@@ -31,6 +31,18 @@ class Solver {
    */
   Solver(const nlohmann::json& config);
 
+  /**
+   * @brief Construct a new Solver object, optionally as a non-root MPI rank.
+   *
+   * When using PETSc GMRES with MPI, only the root rank should construct the
+   * full Model and parse the JSON input. Other ranks participate in the
+   * distributed PETSc solves but do not own the Model.
+   *
+   * @param config Configuration handler (only used on the root rank)
+   * @param is_root Whether this rank owns the Model and parses the input
+   */
+  Solver(const nlohmann::json& config, bool is_root);
+
   /// Set up and initialize the simulation parameters and model
   void setup_initial();
 
@@ -149,6 +161,15 @@ class Solver {
   std::pair<double, double> get_cycle_to_cycle_errors_in_flow_and_pressure(
       const std::vector<State>& states_last_two_cycles,
       const std::pair<int, int>& dof_indices);
+
+  /**
+   * @brief Flag indicating if this rank owns the full Model.
+   *
+   * When using PETSc GMRES with MPI, only the root rank constructs the Model
+   * and parses the JSON input. Other ranks participate in the PETSc solves but
+   * do not access the Model.
+   */
+  bool is_root_{true};
 };
 
 #endif

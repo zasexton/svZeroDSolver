@@ -5,89 +5,128 @@
 
 #include "csv_writer.h"
 
-Solver::Solver(const nlohmann::json& config) {
-  validate_input(config);
-  DEBUG_MSG("Read simulation parameters");
-  simparams = load_simulation_params(config);
-  DEBUG_MSG("Load model");
-  this->model = std::shared_ptr<Model>(new Model());
-  load_simulation_model(config, *this->model.get());
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<mpi.h>)
+#include <mpi.h>
+#endif
+#endif
 
-  // If period isn't specified anywhere, set to 1
-  if (simparams.sim_cardiac_period < 0 &&
-      this->model->cardiac_cycle_period < 0) {
-    this->model->cardiac_cycle_period = 1;
-  } else if (this->model->cardiac_cycle_period >= 0) {
-    // Check for inconsistent period definition
-    if (simparams.sim_cardiac_period >= 0 &&
-        (this->model->cardiac_cycle_period != simparams.sim_cardiac_period)) {
-      throw std::runtime_error(
-          "Inconsistent cardiac cycle period defined in parameters");
+Solver::Solver(const nlohmann::json& config) : Solver(config, true) {}
+
+Solver::Solver(const nlohmann::json& config, bool is_root)
+    : is_root_(is_root) {
+  if (is_root_) {
+    validate_input(config);
+    DEBUG_MSG("Read simulation parameters");
+    simparams = load_simulation_params(config);
+    DEBUG_MSG("Load model");
+    this->model = std::shared_ptr<Model>(new Model());
+    load_simulation_model(config, *this->model.get());
+
+    // If period isn't specified anywhere, set to 1
+    if (simparams.sim_cardiac_period < 0 &&
+        this->model->cardiac_cycle_period < 0) {
+      this->model->cardiac_cycle_period = 1;
+    } else if (this->model->cardiac_cycle_period >= 0) {
+      // Check for inconsistent period definition
+      if (simparams.sim_cardiac_period >= 0 &&
+          (this->model->cardiac_cycle_period !=
+           simparams.sim_cardiac_period)) {
+        throw std::runtime_error(
+            "Inconsistent cardiac cycle period defined in parameters");
+      }
+      // If period is only defined in parameters, set value in model
+    } else {
+      this->model->cardiac_cycle_period = simparams.sim_cardiac_period;
     }
-    // If period is only defined in parameters, set value in model
-  } else {
-    this->model->cardiac_cycle_period = simparams.sim_cardiac_period;
+    DEBUG_MSG("Load initial condition");
+    initial_state = load_initial_condition(config, *this->model.get());
+
+    DEBUG_MSG("Cardiac cycle period " << this->model->cardiac_cycle_period);
+
+    if (!simparams.sim_coupled && simparams.use_cycle_to_cycle_error &&
+        this->model->get_has_windkessel_bc()) {
+      simparams.sim_num_cycles =
+          int(ceil(-1 * this->model->get_largest_windkessel_time_constant() /
+                   this->model->cardiac_cycle_period *
+                   log(simparams.sim_cycle_to_cycle_error)));  // equation 21 of
+                                                               // Pfaller 2021
+      simparams.sim_num_time_steps =
+          (simparams.sim_pts_per_cycle - 1) * simparams.sim_num_cycles + 1;
+    }
+
+    // Calculate time step size
+    if (!simparams.sim_coupled) {
+      simparams.sim_time_step_size =
+          this->model->cardiac_cycle_period /
+          (double(simparams.sim_pts_per_cycle) - 1.0);
+    } else {
+      simparams.sim_time_step_size =
+          simparams.sim_external_step_size /
+          (double(simparams.sim_num_time_steps) - 1.0);
+    }
+
+    sanity_checks();
   }
-  DEBUG_MSG("Load initial condition");
-  initial_state = load_initial_condition(config, *this->model.get());
 
-  DEBUG_MSG("Cardiac cycle period " << this->model->cardiac_cycle_period);
-
-  if (!simparams.sim_coupled && simparams.use_cycle_to_cycle_error &&
-      this->model->get_has_windkessel_bc()) {
-    simparams.sim_num_cycles =
-        int(ceil(-1 * this->model->get_largest_windkessel_time_constant() /
-                 this->model->cardiac_cycle_period *
-                 log(simparams.sim_cycle_to_cycle_error)));  // equation 21 of
-                                                             // Pfaller 2021
-    simparams.sim_num_time_steps =
-        (simparams.sim_pts_per_cycle - 1) * simparams.sim_num_cycles + 1;
-  }
-
-  // Calculate time step size
-  if (!simparams.sim_coupled) {
-    simparams.sim_time_step_size = this->model->cardiac_cycle_period /
-                                   (double(simparams.sim_pts_per_cycle) - 1.0);
-  } else {
-    simparams.sim_time_step_size = simparams.sim_external_step_size /
-                                   (double(simparams.sim_num_time_steps) - 1.0);
-  }
-
-  sanity_checks();
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
+  MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
+            PETSC_COMM_WORLD);
+#endif
 }
 
 void Solver::setup_initial() {
   state = initial_state;
 
-  // Create steady initial condition
+  // Create steady initial condition (root rank only when using PETSc GMRES).
   if (simparams.sim_steady_initial) {
-    DEBUG_MSG("Calculate steady initial condition");
-    double time_step_size_steady = this->model->cardiac_cycle_period / 10.0;
-    this->model->to_steady();
+    if (!is_root_) {
+      // Non-root ranks will receive the steady state via broadcasts inside the
+      // PETSc-based Integrator::step calls.
+    } else {
+      DEBUG_MSG("Calculate steady initial condition");
+      double time_step_size_steady = this->model->cardiac_cycle_period / 10.0;
+      this->model->to_steady();
 
-    Integrator integrator_steady(this->model.get(), time_step_size_steady,
-                                 simparams.sim_rho_infty, simparams.sim_abs_tol,
-                                 simparams.sim_nliter);
+      Integrator integrator_steady(this->model.get(), time_step_size_steady,
+                                   simparams.sim_rho_infty,
+                                   simparams.sim_abs_tol, simparams.sim_nliter);
 
-    for (int i = 0; i < 31; i++) {
-      state = integrator_steady.step(state, time_step_size_steady * double(i));
+      for (int i = 0; i < 31; i++) {
+        state =
+            integrator_steady.step(state, time_step_size_steady * double(i));
+      }
+
+      this->model->to_unsteady();
     }
-
-    this->model->to_unsteady();
   }
 
   // Use the initial condition (steady or user-provided) to set up parameters
-  // which depend on the initial condition
-  this->model->setup_initial_state_dependent_parameters(state);
+  // which depend on the initial condition (root rank only).
+  if (is_root_ && this->model) {
+    this->model->setup_initial_state_dependent_parameters(state);
+  }
   DEBUG_MSG("Setup initial");
 }
 
 void Solver::setup_integrator() {
   // Set-up integrator
   DEBUG_MSG("Setup time integration");
+  int system_size = state.y.size();
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  integrator = Integrator(is_root_ ? this->model.get() : nullptr,
+                          system_size, simparams.sim_time_step_size,
+                          simparams.sim_rho_infty, simparams.sim_abs_tol,
+                          simparams.sim_nliter);
+#else
   integrator = Integrator(this->model.get(), simparams.sim_time_step_size,
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
                           simparams.sim_nliter);
+#endif
 
   // Initialize loop
   states = std::vector<State>();
