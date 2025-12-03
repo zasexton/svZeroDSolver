@@ -58,6 +58,13 @@ void ensure_petsc_initialized() {
     }
     initialized = true;
 
+#ifndef NDEBUG
+    // In debug builds, always enable KSP monitors and views to aid diagnosis
+    // of convergence and performance issues.
+    PetscOptionsSetValue(nullptr, "-ksp_monitor", nullptr);
+    PetscOptionsSetValue(nullptr, "-ksp_view", nullptr);
+#endif
+
     // Ensure PETSc is finalized on clean exit.
     if (!registered_finalize) {
       std::atexit(finalize_petsc);
