@@ -13,10 +13,9 @@
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
-#endif
-
 #if __has_include(<mpi.h>)
 #include <mpi.h>
+#endif
 #endif
 
 /**
@@ -33,17 +32,6 @@ inline bool debug_should_print() {
   if (PetscInitialized(&petsc_init) == 0 && petsc_init) {
     int rank = 0;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
-    return rank == 0;
-  }
-#endif
-
-  // If MPI headers are available, probe MPI directly (works once MPI_Init has run).
-#ifdef MPI_VERSION
-  int mpi_initialized = 0;
-  MPI_Initialized(&mpi_initialized);
-  if (mpi_initialized) {
-    int rank = 0;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     return rank == 0;
   }
 #endif
