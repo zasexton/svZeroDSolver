@@ -24,6 +24,10 @@
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 namespace {
 
+static PetscLogStage stage_analyze = 0;
+static PetscLogStage stage_factorize = 0;
+static PetscLogStage stage_solve = 0;
+
 // Return true on the rank that owns the global Eigen system (rank 0 in
 // PETSC_COMM_WORLD). If MPI is not yet initialized, treat the caller as root.
 bool is_root_rank() {
@@ -40,6 +44,7 @@ bool is_root_rank() {
 void ensure_petsc_initialized() {
   static bool initialized = false;
   static bool registered_finalize = false;
+  static bool log_stages_registered = false;
 
   auto finalize_petsc = []() {
     // Guard against double-finalize.
@@ -67,6 +72,13 @@ void ensure_petsc_initialized() {
     // progress is reported in real time.
     PetscOptionsSetValue(nullptr, "-info", nullptr);
 #endif
+
+    if (!log_stages_registered) {
+      PetscLogStageRegister("svzero_analyze_pattern", &stage_analyze);
+      PetscLogStageRegister("svzero_factorize", &stage_factorize);
+      PetscLogStageRegister("svzero_solve", &stage_solve);
+      log_stages_registered = true;
+    }
 
     // Ensure PETSc is finalized on clean exit.
     if (!registered_finalize) {
@@ -288,6 +300,7 @@ PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
 
 void PetscGMRESLinearSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& A) {
+  PetscLogStagePush(stage_analyze);
   // Determine the global system size on the root rank and broadcast it to all
   // ranks so that PETSc can create distributed objects consistently.
   PetscInt n_global = 0;
@@ -425,11 +438,13 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to create PETSc VecScatter to root");
   }
   DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - VecScatter to root created");
+  PetscLogStagePop();
 }
 
 void PetscGMRESLinearSolver::factorize(
     const Eigen::SparseMatrix<double>& A) {
   DEBUG_MSG("PetscGMRESLinearSolver::factorize - begin");
+  PetscLogStagePush(stage_factorize);
   if (A_ == nullptr || ksp_ == nullptr) {
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
@@ -484,12 +499,14 @@ void PetscGMRESLinearSolver::factorize(
     throw std::runtime_error("Failed to apply PETSc KSP options");
   }
   DEBUG_MSG("PetscGMRESLinearSolver::factorize - end");
+  PetscLogStagePop();
 }
 
 void PetscGMRESLinearSolver::solve(
     const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
     Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
   DEBUG_MSG("PetscGMRESLinearSolver::solve - begin");
+  PetscLogStagePush(stage_solve);
   if (ksp_ == nullptr || x_ == nullptr || b_ == nullptr) {
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
@@ -584,6 +601,7 @@ void PetscGMRESLinearSolver::solve(
     }
   }
   DEBUG_MSG("PetscGMRESLinearSolver::solve - end");
+  PetscLogStagePop();
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
