@@ -609,10 +609,26 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
     if (junction_config.contains("inlet_vessels") &&
         junction_config.contains("outlet_vessels")) {
       for (int vessel_id : junction_config.at("inlet_vessels")) {
-        connections_.push_back({vessel_id_map_.at(vessel_id), junction_name});
+        auto it = vessel_id_map_.find(vessel_id);
+        if (it == vessel_id_map_.end()) {
+          throw std::runtime_error(
+              "StreamingConfigLoader: junction '" + junction_name +
+              "' references unknown inlet vessel_id " +
+              std::to_string(vessel_id) +
+              " (vessel not defined in 'vessels' section)");
+        }
+        connections_.push_back({it->second, junction_name});
       }
       for (int vessel_id : junction_config.at("outlet_vessels")) {
-        connections_.push_back({junction_name, vessel_id_map_.at(vessel_id)});
+        auto it = vessel_id_map_.find(vessel_id);
+        if (it == vessel_id_map_.end()) {
+          throw std::runtime_error(
+              "StreamingConfigLoader: junction '" + junction_name +
+              "' references unknown outlet vessel_id " +
+              std::to_string(vessel_id) +
+              " (vessel not defined in 'vessels' section)");
+        }
+        connections_.push_back({junction_name, it->second});
       }
     } else if (junction_config.contains("inlet_blocks") &&
                junction_config.contains("outlet_blocks")) {
