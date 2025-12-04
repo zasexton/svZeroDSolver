@@ -21,6 +21,10 @@
 // the root rank before calling each block's update_* method.
 extern volatile std::size_t svzero_current_block_index;
 
+// Approximate simulation time associated with the current operation. This is
+// updated by the Integrator before major phases of the time-stepping loop.
+extern volatile double svzero_current_time;
+
 // Global phase indicator for where in the assembly / solve the code is
 // currently operating when a floating-point exception occurs.
 enum : int {

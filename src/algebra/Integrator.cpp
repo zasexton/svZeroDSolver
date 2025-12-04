@@ -120,6 +120,8 @@ State Integrator::step(const State& old_state, double time) {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   const bool is_root = integrator_is_root_rank();
+  // Track the current physical time for debug reporting on all ranks.
+  svzero_current_time = time;
 #else
   const bool is_root = true;
 #endif

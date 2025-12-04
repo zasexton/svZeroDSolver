@@ -42,6 +42,7 @@ static PetscLogStage stage_solve = 0;
 volatile std::size_t svzero_current_block_index =
     static_cast<std::size_t>(-1);
 volatile int svzero_current_phase = SVZERO_PHASE_NONE;
+volatile double svzero_current_time = 0.0;
 
 namespace {
 
@@ -50,6 +51,13 @@ namespace {
 // This is useful on batch HPC systems where interactive debuggers are not
 // available and only log output can be inspected.
 void svzero_sigfpe_handler(int sig) {
+  int rank = -1;
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+
   // Report the current phase and last block index being processed on the
   // root rank, if available. Using fprintf/backtrace here is not strictly
   // async-signal-safe, but is acceptable for debugging on batch systems
@@ -76,7 +84,9 @@ void svzero_sigfpe_handler(int sig) {
       break;
   }
   std::fprintf(stderr,
-               "svZeroDSolver SIGFPE: phase=%s, block_index=%zu\n",
+               "svZeroDSolver SIGFPE: rank=%d, time=%g, phase=%s, block_index=%zu\n",
+               rank,
+               svzero_current_time,
                phase_str,
                svzero_current_block_index);
 
