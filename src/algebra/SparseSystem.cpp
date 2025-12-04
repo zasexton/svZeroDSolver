@@ -122,22 +122,17 @@ void ensure_petsc_initialized() {
     }
     initialized = true;
 
-#ifndef NDEBUG
     // In debug builds, install the PETSc traceback error handler so that
-    // a full stack trace is printed whenever a PETSc error occurs.
+    // a full stack trace is printed whenever a PETSc error occurs. We do not
+    // override PETSc's own SIGFPE handler here so that floating-point
+    // exceptions inside PETSc are reported via its normal mechanisms.
     ierr = PetscPushErrorHandler(PetscTraceBackErrorHandler, nullptr);
     if (ierr) {
       throw std::runtime_error(
           "Failed to install PETSc traceback error handler");
     }
 
-    // Also install a simple SIGFPE handler that prints a backtrace. PETSc's
-    // signal handler prints a brief message, but on batch systems a full
-    // backtrace is often more useful than an interactive debugger.
-#if SVZERO_HAVE_EXECINFO
-    std::signal(SIGFPE, svzero_sigfpe_handler);
-#endif
-
+#ifndef NDEBUG
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
     ierr = PetscLogDefaultBegin();
