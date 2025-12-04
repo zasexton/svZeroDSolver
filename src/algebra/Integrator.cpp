@@ -125,10 +125,10 @@ State Integrator::step(const State& old_state, double time) {
 
       // Update solution-dependent element contributions
       model->update_solution(system, y_af, ydot_am);
-
-      // Evaluate residual
-      system.update_residual(y_af, ydot_am);
     }
+
+    // Evaluate residual (collective across all ranks when using PETSc).
+    system.update_residual(y_af, ydot_am);
 
     // Check termination criterium (based on residual on the root rank).
     double max_residual = 0.0;

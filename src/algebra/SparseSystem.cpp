@@ -4,9 +4,10 @@
 #include "SparseSystem.h"
 
 #include <cstdlib>
-#include <stdexcept>
-#include <sstream>
 #include <cstring>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 #include "Model.h"
 #include "debug.h"
@@ -64,6 +65,13 @@ void ensure_petsc_initialized() {
     initialized = true;
 
 #ifndef NDEBUG
+    // Start the default logging handler so that -log_view can safely
+    // generate a summary at PetscFinalize in newer PETSc versions.
+    ierr = PetscLogDefaultBegin();
+    if (ierr) {
+      throw std::runtime_error("Failed to start PETSc default logging");
+    }
+
     // In debug builds, always enable KSP monitors and views to aid diagnosis
     // of convergence and performance issues.
     PetscOptionsSetValue(nullptr, "-ksp_monitor", nullptr);
@@ -71,6 +79,9 @@ void ensure_petsc_initialized() {
     // Enable PETSc informational output as well so that setup/factorization
     // progress is reported in real time.
     PetscOptionsSetValue(nullptr, "-info", nullptr);
+    // Always generate a PETSc log summary in debug builds so that timings for
+    // the registered log stages and operations are available.
+    PetscOptionsSetValue(nullptr, "-log_view", nullptr);
 #endif
 
     if (!log_stages_registered) {
@@ -301,10 +312,12 @@ PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
 void PetscGMRESLinearSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& A) {
   PetscLogStagePush(stage_analyze);
+  const bool root = is_root_rank();
+
   // Determine the global system size on the root rank and broadcast it to all
   // ranks so that PETSc can create distributed objects consistently.
   PetscInt n_global = 0;
-  if (is_root_rank()) {
+  if (root) {
     n_global = static_cast<PetscInt>(A.rows());
   }
   MPI_Bcast(&n_global, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
@@ -338,44 +351,138 @@ void PetscGMRESLinearSolver::analyze_pattern(
 
   PetscErrorCode ierr;
 
-  // Create a distributed AIJ matrix and matching distributed vectors. PETSc
-  // handles the communicator splits internally when launched with MPI.
-  ierr = MatCreateAIJ(PETSC_COMM_WORLD, PETSC_DECIDE, PETSC_DECIDE, n_, n_,
-                      50, nullptr, 50, nullptr, &A_);
-  if (ierr) {
-    throw std::runtime_error("Failed to create PETSc matrix");
-  }
+  // Determine communicator size and rank.
+  int comm_size = 1;
+  int comm_rank = 0;
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+  MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
 
-  ierr = MatGetOwnershipRange(A_, &rstart_, &rend_);
-  if (ierr) {
-    throw std::runtime_error("Failed to query PETSc matrix ownership range");
+  // Compute a simple contiguous row/column partition [rstart_, rend_) per rank.
+  // This partition is also used for the PETSc MATMPIAIJ diagonal/off-diagonal
+  // split.
+  const PetscInt base = (comm_size > 0) ? (n_ / comm_size) : 0;
+  const PetscInt extra = (comm_size > 0) ? (n_ % comm_size) : 0;
+
+  const PetscInt n_local =
+      base + ((comm_rank < static_cast<int>(extra)) ? 1 : 0);
+  if (comm_rank < static_cast<int>(extra)) {
+    rstart_ = comm_rank * (base + 1);
+  } else {
+    rstart_ = extra * (base + 1) +
+              (comm_rank - static_cast<int>(extra)) * base;
   }
+  rend_ = rstart_ + n_local;
+
   DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - ownership range ["
             << rstart_ << ", " << rend_ << ")");
 
   // Report communicator size and matrix type once (rank 0) for debugging.
   static bool reported_parallel_config = false;
   if (!reported_parallel_config) {
-    int comm_size = 1;
-    int comm_rank = 0;
-    /* Use PETSc introspection to avoid direct MPI dependency at link time. */
-    MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
-    MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
     if (comm_rank == 0) {
-      const char* mtype = nullptr;
-      MatGetType(A_, &mtype);
       DEBUG_MSG("PETSc GMRES using communicator size " << comm_size
-                 << ", matrix type " << (mtype ? mtype : "<unknown>"));
+                 << ", matrix type mpiaij");
     }
     reported_parallel_config = true;
   }
 
-  ierr = VecCreateMPI(PETSC_COMM_WORLD, PETSC_DECIDE, n_, &x_);
+  // Compute exact per-row diagonal and off-diagonal nonzero counts from the
+  // Eigen sparsity pattern on the root rank. This provides accurate
+  // MatMPIAIJ preallocation and avoids PETSc reallocations during
+  // MatSetValues calls.
+  std::vector<PetscInt> diag_nnz_local;
+  std::vector<PetscInt> off_nnz_local;
+  diag_nnz_local.resize(static_cast<std::size_t>(n_local));
+  off_nnz_local.resize(static_cast<std::size_t>(n_local));
+
+  std::vector<PetscInt> diag_nnz_global;
+  std::vector<PetscInt> off_nnz_global;
+
+  if (root) {
+    diag_nnz_global.assign(static_cast<std::size_t>(n_), 0);
+    off_nnz_global.assign(static_cast<std::size_t>(n_), 0);
+
+    // Helper to compute the owning rank for a global index using the same
+    // [rstart,rend) partition defined above.
+    const auto owner = [base, extra](PetscInt idx) -> PetscInt {
+      if (base == 0) {
+        // All rows, if any, live in the first 'extra' ranks; idx will always
+        // satisfy idx < (base + 1) * extra in this case.
+        return (extra > 0) ? (idx / (base + 1)) : 0;
+      }
+      const PetscInt threshold = (base + 1) * extra;
+      if (idx < threshold) {
+        return idx / (base + 1);
+      }
+      return extra + (idx - threshold) / base;
+    };
+
+    for (int k = 0; k < A.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
+        const PetscInt row = static_cast<PetscInt>(it.row());
+        const PetscInt col = static_cast<PetscInt>(it.col());
+        const PetscInt row_owner = owner(row);
+        const PetscInt col_owner = owner(col);
+        if (row_owner == col_owner) {
+          ++diag_nnz_global[static_cast<std::size_t>(row)];
+        } else {
+          ++off_nnz_global[static_cast<std::size_t>(row)];
+        }
+      }
+    }
+  }
+
+  // Build Scatterv metadata describing the row partition so that the global
+  // per-row nnz counts can be distributed to each rank's local rows.
+  std::vector<int> sendcounts(static_cast<std::size_t>(comm_size));
+  std::vector<int> displs(static_cast<std::size_t>(comm_size));
+  for (int p = 0; p < comm_size; ++p) {
+    const PetscInt n_local_p =
+        base + ((p < static_cast<int>(extra)) ? 1 : 0);
+    PetscInt rstart_p = 0;
+    if (p < static_cast<int>(extra)) {
+      rstart_p = p * (base + 1);
+    } else {
+      rstart_p = extra * (base + 1) +
+                 (p - static_cast<int>(extra)) * base;
+    }
+    sendcounts[static_cast<std::size_t>(p)] =
+        static_cast<int>(n_local_p);
+    displs[static_cast<std::size_t>(p)] =
+        static_cast<int>(rstart_p);
+  }
+
+  // Distribute the exact per-row nnz to each rank.
+  MPI_Scatterv(root ? diag_nnz_global.data() : nullptr,
+               sendcounts.data(), displs.data(), MPIU_INT,
+               diag_nnz_local.data(),
+               static_cast<int>(n_local),
+               MPIU_INT, 0, PETSC_COMM_WORLD);
+
+  MPI_Scatterv(root ? off_nnz_global.data() : nullptr,
+               sendcounts.data(), displs.data(), MPIU_INT,
+               off_nnz_local.data(),
+               static_cast<int>(n_local),
+               MPIU_INT, 0, PETSC_COMM_WORLD);
+
+  // Create a distributed AIJ matrix and matching distributed vectors using the
+  // exact per-row diagonal/off-diagonal nonzero counts for preallocation.
+  ierr = MatCreateAIJ(PETSC_COMM_WORLD,
+                      n_local, n_local, n_, n_,
+                      0, diag_nnz_local.data(),
+                      0, off_nnz_local.data(),
+                      &A_);
+  if (ierr) {
+    throw std::runtime_error("Failed to create PETSc matrix");
+  }
+
+  // Create matching distributed solution and RHS vectors.
+  ierr = VecCreateMPI(PETSC_COMM_WORLD, n_local, n_, &x_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc solution vector");
   }
 
-  ierr = VecCreateMPI(PETSC_COMM_WORLD, PETSC_DECIDE, n_, &b_);
+  ierr = VecCreateMPI(PETSC_COMM_WORLD, n_local, n_, &b_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc RHS vector");
   }
@@ -449,39 +556,12 @@ void PetscGMRESLinearSolver::factorize(
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
 
-  // Assemble the PETSc matrix from the Eigen sparse matrix.
-  PetscErrorCode ierr = MatZeroEntries(A_);
-  if (ierr) {
-    throw std::runtime_error("Failed to zero PETSc matrix");
-  }
+  // The PETSc matrix has already been assembled by the SparseSystem. Here we
+  // simply (re)attach it to the KSP object and configure tolerances and any
+  // options. The Eigen matrix argument is ignored for the PETSc backend.
+  (void)A;
 
-  // Only the root rank owns the global Eigen matrix. Insert its entries into
-  // the distributed PETSc matrix. Other ranks participate only in the
-  // collective assembly calls below.
-  if (is_root_rank()) {
-    for (int k = 0; k < A.outerSize(); ++k) {
-      for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
-        const PetscInt row = static_cast<PetscInt>(it.row());
-        const PetscInt col = static_cast<PetscInt>(it.col());
-        const PetscScalar val = static_cast<PetscScalar>(it.value());
-        ierr = MatSetValue(A_, row, col, val, INSERT_VALUES);
-        if (ierr) {
-          throw std::runtime_error("Failed to set PETSc matrix entry");
-        }
-      }
-    }
-  }
-
-  ierr = MatAssemblyBegin(A_, MAT_FINAL_ASSEMBLY);
-  if (ierr) {
-    throw std::runtime_error("Failed to begin PETSc matrix assembly");
-  }
-  ierr = MatAssemblyEnd(A_, MAT_FINAL_ASSEMBLY);
-  if (ierr) {
-    throw std::runtime_error("Failed to end PETSc matrix assembly");
-  }
-
-  ierr = KSPSetOperators(ksp_, A_, A_);
+  PetscErrorCode ierr = KSPSetOperators(ksp_, A_, A_);
   if (ierr) {
     throw std::runtime_error("Failed to set PETSc KSP operators");
   }
@@ -511,33 +591,11 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error("PETSc GMRES solver not initialized");
   }
 
-  PetscErrorCode ierr = VecSet(b_, 0.0);
-  if (ierr) {
-    throw std::runtime_error("Failed to zero PETSc RHS vector");
-  }
+  // The RHS has already been assembled by the SparseSystem into b_. The Eigen
+  // vector argument is ignored for the PETSc backend.
+  (void)b;
 
-  // Only the root rank owns the global Eigen RHS. Insert its entries into the
-  // distributed PETSc RHS vector. Other ranks participate only in the
-  // collective assembly calls below.
-  if (is_root_rank()) {
-    for (PetscInt i = 0; i < n_; ++i) {
-      ierr = VecSetValue(b_, i, static_cast<PetscScalar>(b[i]), INSERT_VALUES);
-      if (ierr) {
-        throw std::runtime_error("Failed to set PETSc RHS entry");
-      }
-    }
-  }
-
-  ierr = VecAssemblyBegin(b_);
-  if (ierr) {
-    throw std::runtime_error("Failed to begin PETSc RHS assembly");
-  }
-  ierr = VecAssemblyEnd(b_);
-  if (ierr) {
-    throw std::runtime_error("Failed to end PETSc RHS assembly");
-  }
-
-  ierr = VecSet(x_, 0.0);
+  PetscErrorCode ierr = VecSet(x_, 0.0);
   if (ierr) {
     throw std::runtime_error("Failed to zero PETSc solution vector");
   }
@@ -684,9 +742,25 @@ std::shared_ptr<LinearSolver> make_default_linear_solver() {
 
 }  // namespace
 
-SparseSystem::SparseSystem() : solver(make_default_linear_solver()) {}
+SparseSystem::SparseSystem()
+    : solver(make_default_linear_solver())
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    , backend_(LinearBackend::PETSc)
+#else
+    , backend_(LinearBackend::Eigen)
+#endif
+{}
 
-SparseSystem::SparseSystem(int n) : solver(make_default_linear_solver()) {
+SparseSystem::SparseSystem(int n)
+    : solver(make_default_linear_solver())
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    , backend_(LinearBackend::PETSc)
+#else
+    , backend_(LinearBackend::Eigen)
+#endif
+{
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   const bool is_root = is_root_rank();
@@ -701,9 +775,17 @@ SparseSystem::SparseSystem(int n) : solver(make_default_linear_solver()) {
     dC_dydot = Eigen::SparseMatrix<double>(n, n);
     C = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
 
-    jacobian = Eigen::SparseMatrix<double>(n, n);
-    residual = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
-    dydot = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+    if (backend_ == LinearBackend::Eigen) {
+      jacobian = Eigen::SparseMatrix<double>(n, n);
+      residual = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+      dydot = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
+    } else {
+      jacobian.resize(0, 0);
+      // residual and dydot will be sized on demand during reserve() for the
+      // PETSc backend (on the root rank only).
+      residual.resize(0);
+      dydot.resize(0);
+    }
   } else {
     F.resize(0, 0);
     E.resize(0, 0);
@@ -742,11 +824,12 @@ void SparseSystem::reserve(Model* model) {
     model->update_constant(*this);
     model->update_time(*this, 0.0);
 
+    const Eigen::Index n =
+        static_cast<Eigen::Index>(C.size());
     Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_y =
-        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
-
+        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(n);
     Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_dy =
-        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(residual.size());
+        Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(n);
 
     model->update_solution(*this, dummy_y, dummy_dy);
 
@@ -754,20 +837,137 @@ void SparseSystem::reserve(Model* model) {
     E.makeCompressed();
     dC_dy.makeCompressed();
     dC_dydot.makeCompressed();
-    jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
-    update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
-    jacobian.makeCompressed();
+    if (backend_ == LinearBackend::Eigen) {
+      jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
+      update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
+      jacobian.makeCompressed();
+      // Let the solver analyze the sparsity pattern and set up any internal
+      // data structures on the root rank. Non-root ranks will call
+      // analyze_pattern with an empty matrix below.
+      solver->analyze_pattern(jacobian);
+    } else {
+      // For PETSc we keep small Eigen vectors on the root for nonlinear
+      // convergence checks and solution updates, but we do not store a full
+      // Eigen Jacobian.
+      residual =
+          Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(C.size());
+      dydot =
+          Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(C.size());
+
+      // For the PETSc backend, we still build a one-time Eigen Jacobian-style
+      // sparsity pattern using the existing system matrices, but we do not
+      // keep it around for repeated use.
+      Eigen::SparseMatrix<double> jac_pattern(F.rows(), F.cols());
+      jac_pattern.reserve(num_triplets.F + num_triplets.E);
+      jac_pattern = (E + dC_dydot) + (F + dC_dy);
+      jac_pattern.makeCompressed();
+      solver->analyze_pattern(jac_pattern);
+    }
   }
 
-  // Let the solver analyze the sparsity pattern and set up any internal data
-  // structures. For the PETSc backend, this also creates the distributed
-  // PETSc objects on all ranks.
-  solver->analyze_pattern(jacobian);
+  if (!is_root) {
+    // Non-root ranks still need the solver to see a matrix so that it can
+    // perform any necessary collective setup (e.g., PETSc matrix/vector
+    // creation). For Eigen backends, provide an empty matrix with the
+    // correct dimensions; for PETSc we can simply pass an empty matrix.
+    Eigen::SparseMatrix<double> empty;
+    if (backend_ == LinearBackend::Eigen) {
+      empty.resize(jacobian.rows(), jacobian.cols());
+    }
+    solver->analyze_pattern(empty);
+  }
 }
 
 void SparseSystem::update_residual(
     Eigen::Matrix<double, Eigen::Dynamic, 1>& y,
     Eigen::Matrix<double, Eigen::Dynamic, 1>& ydot) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  if (backend_ == LinearBackend::PETSc) {
+    auto petsc_solver =
+        std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
+    if (petsc_solver) {
+      Vec b = petsc_solver->get_rhs();
+      if (b == nullptr) {
+        throw std::runtime_error(
+            "PETSc GMRES RHS vector not initialized in update_residual");
+      }
+
+      PetscErrorCode ierr = VecSet(b, 0.0);
+      if (ierr) {
+        throw std::runtime_error("Failed to zero PETSc RHS vector");
+      }
+
+      if (is_root_rank()) {
+        const PetscInt n = static_cast<PetscInt>(C.size());
+
+        // Maintain an Eigen residual on the root rank for nonlinear
+        // convergence checks.
+        if (residual.size() != C.size()) {
+          residual.setZero(C.size());
+        } else {
+          residual.setZero();
+        }
+
+        // Contribution from the constant term: residual -= C.
+        for (PetscInt i = 0; i < n; ++i) {
+          const double val = -C[static_cast<Eigen::Index>(i)];
+          residual[static_cast<Eigen::Index>(i)] += val;
+          ierr = VecSetValue(b, i, static_cast<PetscScalar>(val),
+                             ADD_VALUES);
+          if (ierr) {
+            throw std::runtime_error("Failed to set PETSc RHS entry (C)");
+          }
+        }
+
+        // Contribution from -E * ydot.
+        for (int k = 0; k < E.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(E, k); it; ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const double val =
+                -it.value() * ydot[static_cast<Eigen::Index>(col)];
+            residual[static_cast<Eigen::Index>(row)] += val;
+            ierr = VecSetValue(b, row, static_cast<PetscScalar>(val),
+                               ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc RHS entry (E * ydot)");
+            }
+          }
+        }
+
+        // Contribution from -F * y.
+        for (int k = 0; k < F.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(F, k); it; ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const double val =
+                -it.value() * y[static_cast<Eigen::Index>(col)];
+            residual[static_cast<Eigen::Index>(row)] += val;
+            ierr = VecSetValue(b, row, static_cast<PetscScalar>(val),
+                               ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc RHS entry (F * y)");
+            }
+          }
+        }
+      }
+
+      ierr = VecAssemblyBegin(b);
+      if (ierr) {
+        throw std::runtime_error("Failed to begin PETSc RHS assembly");
+      }
+      ierr = VecAssemblyEnd(b);
+      if (ierr) {
+        throw std::runtime_error("Failed to end PETSc RHS assembly");
+      }
+      return;
+    }
+  }
+#endif
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   if (!is_root_rank()) {
@@ -782,6 +982,103 @@ void SparseSystem::update_residual(
 
 void SparseSystem::update_jacobian(double time_coeff_ydot,
                                    double time_coeff_y) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  if (backend_ == LinearBackend::PETSc) {
+    auto petsc_solver =
+        std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
+    if (petsc_solver) {
+      Mat A = petsc_solver->get_matrix();
+      if (A == nullptr) {
+        throw std::runtime_error(
+            "PETSc GMRES matrix not initialized in update_jacobian");
+      }
+
+      PetscErrorCode ierr = MatZeroEntries(A);
+      if (ierr) {
+        throw std::runtime_error("Failed to zero PETSc matrix");
+      }
+
+      if (is_root_rank()) {
+        // J = (E + dC_dydot) * time_coeff_ydot
+        //   + (F + dC_dy) * time_coeff_y
+
+        // Contribution from E.
+        for (int k = 0; k < E.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(E, k); it; ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const PetscScalar val =
+                static_cast<PetscScalar>(time_coeff_ydot * it.value());
+            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc matrix entry (E)");
+            }
+          }
+        }
+
+        // Contribution from dC_dydot.
+        for (int k = 0; k < dC_dydot.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(dC_dydot, k); it;
+               ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const PetscScalar val =
+                static_cast<PetscScalar>(time_coeff_ydot * it.value());
+            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc matrix entry (dC_dydot)");
+            }
+          }
+        }
+
+        // Contribution from F.
+        for (int k = 0; k < F.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(F, k); it; ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const PetscScalar val =
+                static_cast<PetscScalar>(time_coeff_y * it.value());
+            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc matrix entry (F)");
+            }
+          }
+        }
+
+        // Contribution from dC_dy.
+        for (int k = 0; k < dC_dy.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(dC_dy, k); it;
+               ++it) {
+            const PetscInt row = static_cast<PetscInt>(it.row());
+            const PetscInt col = static_cast<PetscInt>(it.col());
+            const PetscScalar val =
+                static_cast<PetscScalar>(time_coeff_y * it.value());
+            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
+            if (ierr) {
+              throw std::runtime_error(
+                  "Failed to set PETSc matrix entry (dC_dy)");
+            }
+          }
+        }
+      }
+
+      ierr = MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY);
+      if (ierr) {
+        throw std::runtime_error("Failed to begin PETSc matrix assembly");
+      }
+      ierr = MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY);
+      if (ierr) {
+        throw std::runtime_error("Failed to end PETSc matrix assembly");
+      }
+      return;
+    }
+  }
+#endif
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   if (!is_root_rank()) {

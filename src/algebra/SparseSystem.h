@@ -42,6 +42,12 @@ using SvZeroIterativePreconditioner =
 // Forward declaration of Model
 class Model;
 
+/// Backend used by SparseSystem for its linear algebra representation.
+enum class LinearBackend {
+  Eigen,
+  PETSc
+};
+
 /**
  * @brief Abstract base class for linear solvers
  *
@@ -171,6 +177,12 @@ class PetscGMRESLinearSolver : public LinearSolver {
 
   void solve(const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
              Eigen::Matrix<double, Eigen::Dynamic, 1>& x) override;
+
+  // Accessors used by PETSc-centric assembly paths. These return aliases to
+  // the underlying PETSc objects managed by this solver.
+  Mat get_matrix() const { return A_; }
+  Vec get_rhs() const { return b_; }
+  Vec get_solution() const { return x_; }
 
  private:
   Mat A_ = nullptr;
@@ -315,6 +327,9 @@ class SparseSystem {
  private:
   /// Linear solver backend
   std::shared_ptr<LinearSolver> solver;
+
+  /// Representation backend (Eigen or PETSc) used by this sparse system.
+  LinearBackend backend_ = LinearBackend::Eigen;
 };
 
 #endif  // SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_
