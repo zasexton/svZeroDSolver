@@ -4,12 +4,7 @@
 
 #include <chrono>
 
-// Externally defined in src/algebra/SparseSystem.cpp; used only for debugging
-// floating-point exceptions in large models.
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-extern volatile std::size_t svzero_current_block_index;
-#endif
+#include "SvzeroDebug.h"
 
 template <typename block_type>
 BlockFactoryFunc block_factory() {
@@ -211,6 +206,11 @@ void Model::update_constant(SparseSystem& system) {
                 << (i + 1) << " / " << n);
       t_last = now;
     }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_CONSTANT;
+    svzero_current_block_index = i;
+#endif
     blocks[i]->update_constant(system, parameter_values);
   }
   auto t1 = Clock::now();
@@ -240,6 +240,11 @@ void Model::update_time(SparseSystem& system, double time) {
                 << (i + 1) << " / " << n);
       t_last = now;
     }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_TIME;
+    svzero_current_block_index = i;
+#endif
     blocks[i]->update_time(system, parameter_values);
   }
   auto t1 = Clock::now();
@@ -267,6 +272,7 @@ void Model::update_solution(SparseSystem& system,
     }
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_SOLUTION;
     svzero_current_block_index = i;
 #endif
     blocks[i]->update_solution(system, parameter_values, y, dy);

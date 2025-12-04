@@ -12,6 +12,7 @@
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
+#include "SvzeroDebug.h"
 namespace {
 inline bool integrator_is_root_rank() {
 #ifdef MPI_VERSION
@@ -97,7 +98,18 @@ void Integrator::update_params(double time_step_size) {
   }
 #endif
   if (model) {
+    // Rebuild constant/time-dependent contributions at t=0.
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_CONSTANT;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_constant(system);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_TIME;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_time(system, 0.0);
   }
 }
@@ -124,6 +136,11 @@ State Integrator::step(const State& old_state, double time) {
   // Evaluate time-dependent element contributions in system
   if (is_root) {
     DEBUG_MSG("Integrator::step - calling Model::update_time at t=" << new_time);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_STEP_TIME;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_time(system, new_time);
   }
 
@@ -142,6 +159,11 @@ State Integrator::step(const State& old_state, double time) {
 
       // Update solution-dependent element contributions
       DEBUG_MSG("Integrator::step - calling Model::update_solution, iter=" << i);
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+      svzero_current_phase = SVZERO_PHASE_STEP_SOLUTION;
+      svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
       model->update_solution(system, y_af, ydot_am);
     }
 

@@ -190,6 +190,50 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
     sim_config["simulation_parameters"] = sim_params_json_;
     simparams_ = load_simulation_params(sim_config);
 
+    // Mirror the time-stepping logic from Solver/Interface: ensure the model
+    // has a valid cardiac_cycle_period and derive the time step size and,
+    // if needed, the total number of time steps.
+    if (model_.cardiac_cycle_period < 0.0) {
+      // If it has not been read from config or Parameter yet, set a default
+      // value of 1.0 s.
+      model_.cardiac_cycle_period = 1.0;
+    }
+
+    if (!simparams_.sim_coupled && simparams_.use_cycle_to_cycle_error &&
+        model_.get_has_windkessel_bc()) {
+      const double tau = model_.get_largest_windkessel_time_constant();
+      const double T = model_.cardiac_cycle_period;
+      if (T <= 0.0) {
+        throw std::runtime_error(
+            "Invalid cardiac_cycle_period when computing cycle-to-cycle "
+            "error-based number of cycles");
+      }
+      simparams_.sim_num_cycles =
+          int(std::ceil(-1.0 * tau / T *
+                        std::log(simparams_.sim_cycle_to_cycle_error)));
+      simparams_.sim_num_time_steps =
+          (simparams_.sim_pts_per_cycle - 1) * simparams_.sim_num_cycles + 1;
+    }
+
+    if (!simparams_.sim_coupled) {
+      const double denom =
+          static_cast<double>(simparams_.sim_pts_per_cycle) - 1.0;
+      if (denom <= 0.0) {
+        throw std::runtime_error(
+            "Invalid pts_per_cycle when computing time step size");
+      }
+      simparams_.sim_time_step_size = model_.cardiac_cycle_period / denom;
+    } else {
+      const double denom =
+          static_cast<double>(simparams_.sim_num_time_steps) - 1.0;
+      if (denom <= 0.0) {
+        throw std::runtime_error(
+            "Invalid num_time_steps when computing external time step size");
+      }
+      simparams_.sim_time_step_size =
+          simparams_.sim_external_step_size / denom;
+    }
+
     // Finalize connections and model.
     for (const auto& conn : connections_) {
       auto ele1 = model_.get_block(std::get<0>(conn));
@@ -306,14 +350,22 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
   }
 
   bool should_start_dom_object() const {
-    if (!building_dom_) return false;
-    // The root object of the DOM subtree is already present in dom_stack_.
-    return !dom_stack_.empty();
+    if (!building_dom_ || !dom_root_) {
+      return false;
+    }
+    // Only create new child objects when we are below the root depth of the
+    // DOM subtree. At the root depth the object has already been created by
+    // begin_dom().
+    return !dom_stack_.empty() && depth_ > dom_start_depth_;
   }
 
   bool should_start_dom_array() const {
-    if (!building_dom_) return false;
-    return !dom_stack_.empty();
+    if (!building_dom_ || !dom_root_) {
+      return false;
+    }
+    // Only create new child arrays when we are below the root depth of the
+    // DOM subtree.
+    return !dom_stack_.empty() && depth_ > dom_start_depth_;
   }
 
   void begin_dom(Json& root, int start_depth) {

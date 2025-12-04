@@ -7,12 +7,10 @@
 #include <fstream>
 
 #include "Solver.h"
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
 #include "StreamingConfigLoader.h"
-#endif
 
 /**
  *
@@ -94,8 +92,6 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   SimulationParameters simparams;
   std::shared_ptr<Model> model;
   State initial_state;
@@ -112,23 +108,6 @@ int main(int argc, char* argv[]) {
     }
   }
   auto solver = Solver(simparams, model, initial_state, is_root);
-#else
-  nlohmann::json config;
-  if (is_root) {
-    DEBUG_MSG("svzerodsolver - root parsing JSON config");
-    try {
-      config = nlohmann::json::parse(input_file);
-    } catch (const nlohmann::json::parse_error& e) {
-      std::cout << "[svzerodsolver] Error: Parsing the input file '"
-                << input_file_name << "' has failed." << std::endl;
-      std::cout << "[svzerodsolver] Details of the parsing error: "
-                << std::endl;
-      std::cout << e.what() << std::endl;
-      return 1;
-    }
-  }
-  auto solver = Solver(config, is_root);
-#endif
 
 #ifdef SVZERODSOLVER_LINEAR_SOLVER_NAME
   DEBUG_MSG("Using linear solver: " << SVZERODSOLVER_LINEAR_SOLVER_NAME);

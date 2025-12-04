@@ -9,13 +9,15 @@ set(CXXSRCS
   csv_writer.cpp 
   SimulationParameters.cpp 
   Solver.cpp
+  StreamingConfigLoader.cpp
 )
 
 set(HDRS 
   csv_writer.h 
   debug.h 
   SimulationParameters.h 
-  Solver.h 
+  Solver.h
+  StreamingConfigLoader.h
 )
 
 add_library(${lib} OBJECT ${CXXSRCS} )

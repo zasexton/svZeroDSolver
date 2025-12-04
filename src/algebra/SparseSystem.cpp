@@ -18,6 +18,7 @@
 #define SVZERO_HAVE_EXECINFO 0
 #endif
 
+#include "SvzeroDebug.h"
 #include "Model.h"
 #include "debug.h"
 
@@ -36,11 +37,10 @@ static PetscLogStage stage_analyze = 0;
 static PetscLogStage stage_factorize = 0;
 static PetscLogStage stage_solve = 0;
 
-// Global index of the block currently being processed in Model::update_solution
-// (root rank only). This is used purely for debugging floating-point
-// exceptions in large models.
+// Global debug state used to report where a floating-point exception occurred.
 volatile std::size_t svzero_current_block_index =
     static_cast<std::size_t>(-1);
+volatile int svzero_current_phase = SVZERO_PHASE_NONE;
 
 namespace {
 
@@ -49,14 +49,36 @@ namespace {
 // This is useful on batch HPC systems where interactive debuggers are not
 // available and only log output can be inspected.
 void svzero_sigfpe_handler(int sig) {
-  // Report the last block index being processed on the root rank, if set.
-  if (svzero_current_block_index != static_cast<std::size_t>(-1)) {
-    // Using fprintf here is not strictly async-signal-safe, but is acceptable
-    // for debugging on batch systems where the process is about to abort.
-    std::fprintf(stderr,
-                 "svZeroDSolver SIGFPE while processing block index %zu\n",
-                 svzero_current_block_index);
+  // Report the current phase and last block index being processed on the
+  // root rank, if available. Using fprintf/backtrace here is not strictly
+  // async-signal-safe, but is acceptable for debugging on batch systems
+  // where the process is about to abort.
+  const char* phase_str = "none";
+  switch (svzero_current_phase) {
+    case SVZERO_PHASE_RESERVE_CONSTANT:
+      phase_str = "reserve_update_constant";
+      break;
+    case SVZERO_PHASE_RESERVE_TIME:
+      phase_str = "reserve_update_time";
+      break;
+    case SVZERO_PHASE_RESERVE_SOLUTION:
+      phase_str = "reserve_update_solution";
+      break;
+    case SVZERO_PHASE_STEP_TIME:
+      phase_str = "step_update_time";
+      break;
+    case SVZERO_PHASE_STEP_SOLUTION:
+      phase_str = "step_update_solution";
+      break;
+    default:
+      phase_str = "none";
+      break;
   }
+  std::fprintf(stderr,
+               "svZeroDSolver SIGFPE: phase=%s, block_index=%zu\n",
+               phase_str,
+               svzero_current_block_index);
+
   void* frames[64];
   int n = backtrace(frames, 64);
   backtrace_symbols_fd(frames, n, 2);  // 2 = stderr
@@ -915,24 +937,33 @@ void SparseSystem::reserve(Model* model) {
               << ", E=" << num_triplets.E
               << ", D=" << num_triplets.D);
 
-    F.reserve(num_triplets.F);
-    E.reserve(num_triplets.E);
-    dC_dy.reserve(num_triplets.D);
-    dC_dydot.reserve(num_triplets.D);
-
-    if (backend_ == LinearBackend::PETSc) {
-      // Enable triplet-based assembly for the initial construction of the
-      // system matrices to avoid expensive incremental sparse insertions.
-      use_triplets_ = true;
-      F_triplets_.reserve(static_cast<std::size_t>(num_triplets.F));
-      E_triplets_.reserve(static_cast<std::size_t>(num_triplets.E));
-      dC_dy_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
-      dC_dydot_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
-    }
+    // During the initial reserve/build phase we always assemble via triplet
+    // lists, regardless of the backend. This avoids costly incremental sparse
+    // insertions for large systems and produces an identical sparsity pattern
+    // for both Eigen- and PETSc-based solves.
+    use_triplets_ = true;
+    F_triplets_.clear();
+    E_triplets_.clear();
+    dC_dy_triplets_.clear();
+    dC_dydot_triplets_.clear();
+    F_triplets_.reserve(static_cast<std::size_t>(num_triplets.F));
+    E_triplets_.reserve(static_cast<std::size_t>(num_triplets.E));
+    dC_dy_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
+    dC_dydot_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
 
     DEBUG_MSG("SparseSystem::reserve - calling Model::update_constant");
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_CONSTANT;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_constant(*this);
     DEBUG_MSG("SparseSystem::reserve - calling Model::update_time");
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_TIME;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_time(*this, 0.0);
 
     const Eigen::Index n =
@@ -943,18 +974,29 @@ void SparseSystem::reserve(Model* model) {
         Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(n);
 
     DEBUG_MSG("SparseSystem::reserve - calling Model::update_solution");
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_RESERVE_SOLUTION;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     model->update_solution(*this, dummy_y, dummy_dy);
 
     DEBUG_MSG("SparseSystem::reserve - compressing system matrices");
-    if (backend_ == LinearBackend::PETSc && use_triplets_) {
+    if (use_triplets_) {
       // Build Eigen sparse matrices from the assembled triplet lists.
       const Eigen::Index nrows =
           static_cast<Eigen::Index>(C.size());
       const Eigen::Index ncols = nrows;
+
       F = Eigen::SparseMatrix<double>(nrows, ncols);
       E = Eigen::SparseMatrix<double>(nrows, ncols);
       dC_dy = Eigen::SparseMatrix<double>(nrows, ncols);
       dC_dydot = Eigen::SparseMatrix<double>(nrows, ncols);
+
+      F.reserve(num_triplets.F);
+      E.reserve(num_triplets.E);
+      dC_dy.reserve(num_triplets.D);
+      dC_dydot.reserve(num_triplets.D);
 
       if (!F_triplets_.empty()) {
         F.setFromTriplets(F_triplets_.begin(), F_triplets_.end());
@@ -975,17 +1017,12 @@ void SparseSystem::reserve(Model* model) {
       dC_dy_triplets_.clear();
       dC_dydot_triplets_.clear();
       use_triplets_ = false;
-
-      F.makeCompressed();
-      E.makeCompressed();
-      dC_dy.makeCompressed();
-      dC_dydot.makeCompressed();
-    } else {
-      F.makeCompressed();
-      E.makeCompressed();
-      dC_dy.makeCompressed();
-      dC_dydot.makeCompressed();
     }
+
+    F.makeCompressed();
+    E.makeCompressed();
+    dC_dy.makeCompressed();
+    dC_dydot.makeCompressed();
     DEBUG_MSG("SparseSystem::reserve - nonzeros F=" << F.nonZeros()
               << ", E=" << E.nonZeros()
               << ", dC_dy=" << dC_dy.nonZeros()
@@ -1022,6 +1059,11 @@ void SparseSystem::reserve(Model* model) {
       solver->analyze_pattern(jac_pattern);
     }
     DEBUG_MSG("SparseSystem::reserve - end on root");
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_NONE;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
   }
 
   if (!is_root) {
