@@ -133,14 +133,18 @@ void ensure_petsc_initialized() {
     }
     initialized = true;
 
-    // In debug PETSc builds, floating-point exceptions may be trapped
-    // aggressively inside PETSc itself (for example via FE_DIVBYZERO). This
-    // can cause SIGFPE to be raised on non-root ranks during internal PETSc
-    // setup before our own application code has started a time step. To make
-    // it easier to diagnose issues in the model code, we disable PETSc-level
+    // PETSc may enable floating-point traps (SIGFPE) based on the initial
+    // environment and the -fp_trap option. This is useful for catching
+    // numerical issues inside PETSc itself, but in large MPI runs it can
+    // cause floating-point exceptions to be raised on non-root ranks during
+    // internal setup, before our application code has entered a well-defined
+    // phase. To make diagnostics more robust, we explicitly disable PETSc's
     // FP traps here so that invalid operations produce NaNs/Infs instead of
     // signals; our own residual/Jacobian checks will detect and report them.
-    PetscFPTrapPush(PETSC_FP_TRAP_OFF);
+    ierr = PetscSetFPTrap(PETSC_FP_TRAP_OFF);
+    if (ierr) {
+      throw std::runtime_error("Failed to disable PETSc FP traps");
+    }
 
     // In debug builds, install the PETSc traceback error handler so that
     // a full stack trace is printed whenever a PETSc error occurs.
