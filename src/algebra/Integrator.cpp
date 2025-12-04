@@ -39,6 +39,7 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
 Integrator::Integrator(Model* model, int system_size, double time_step_size,
                        double rho, double atol, int max_iter)
     : system(SparseSystem(system_size)), model(model) {
+  DEBUG_MSG("Integrator::Integrator - begin, system_size=" << system_size);
   alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho);
   alpha_f = 1.0 / (1.0 + rho);
   gamma = 0.5 + alpha_m - alpha_f;
@@ -56,7 +57,9 @@ Integrator::Integrator(Model* model, int system_size, double time_step_size,
   ydot_am = Eigen::Matrix<double, Eigen::Dynamic, 1>(size);
 
   // Make some memory reservations
+  DEBUG_MSG("Integrator::Integrator - calling SparseSystem::reserve");
   system.reserve(model);
+  DEBUG_MSG("Integrator::Integrator - end");
 }
 
 // Must declare default constructord and dedtructor

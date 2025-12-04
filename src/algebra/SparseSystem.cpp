@@ -318,6 +318,7 @@ void PetscGMRESLinearSolver::analyze_pattern(
   // ranks so that PETSc can create distributed objects consistently.
   PetscInt n_global = 0;
   if (root) {
+    DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - computing per-row nnz from Eigen pattern");
     n_global = static_cast<PetscInt>(A.rows());
   }
   MPI_Bcast(&n_global, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
@@ -453,6 +454,7 @@ void PetscGMRESLinearSolver::analyze_pattern(
   }
 
   // Distribute the exact per-row nnz to each rank.
+  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - scattering per-row nnz to all ranks");
   MPI_Scatterv(root ? diag_nnz_global.data() : nullptr,
                sendcounts.data(), displs.data(), MPIU_INT,
                diag_nnz_local.data(),
@@ -467,6 +469,7 @@ void PetscGMRESLinearSolver::analyze_pattern(
 
   // Create a distributed AIJ matrix and matching distributed vectors using the
   // exact per-row diagonal/off-diagonal nonzero counts for preallocation.
+  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - creating distributed PETSc matrix and vectors");
   ierr = MatCreateAIJ(PETSC_COMM_WORLD,
                       n_local, n_local, n_, n_,
                       0, diag_nnz_local.data(),
@@ -815,13 +818,19 @@ void SparseSystem::reserve(Model* model) {
 #endif
 
   if (is_root) {
+    DEBUG_MSG("SparseSystem::reserve - begin on root");
     auto num_triplets = model->get_num_triplets();
+    DEBUG_MSG("SparseSystem::reserve - triplets F=" << num_triplets.F
+              << ", E=" << num_triplets.E
+              << ", D=" << num_triplets.D);
     F.reserve(num_triplets.F);
     E.reserve(num_triplets.E);
     dC_dy.reserve(num_triplets.D);
     dC_dydot.reserve(num_triplets.D);
 
+    DEBUG_MSG("SparseSystem::reserve - calling Model::update_constant");
     model->update_constant(*this);
+    DEBUG_MSG("SparseSystem::reserve - calling Model::update_time");
     model->update_time(*this, 0.0);
 
     const Eigen::Index n =
@@ -831,13 +840,16 @@ void SparseSystem::reserve(Model* model) {
     Eigen::Matrix<double, Eigen::Dynamic, 1> dummy_dy =
         Eigen::Matrix<double, Eigen::Dynamic, 1>::Ones(n);
 
+    DEBUG_MSG("SparseSystem::reserve - calling Model::update_solution");
     model->update_solution(*this, dummy_y, dummy_dy);
 
+    DEBUG_MSG("SparseSystem::reserve - compressing system matrices");
     F.makeCompressed();
     E.makeCompressed();
     dC_dy.makeCompressed();
     dC_dydot.makeCompressed();
     if (backend_ == LinearBackend::Eigen) {
+      DEBUG_MSG("SparseSystem::reserve - building Eigen jacobian pattern");
       jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate
       update_jacobian(1.0, 1.0);  // Update it once to have sparsity pattern
       jacobian.makeCompressed();
@@ -846,6 +858,7 @@ void SparseSystem::reserve(Model* model) {
       // analyze_pattern with an empty matrix below.
       solver->analyze_pattern(jacobian);
     } else {
+      DEBUG_MSG("SparseSystem::reserve - PETSc backend: initializing residual/dydot on root");
       // For PETSc we keep small Eigen vectors on the root for nonlinear
       // convergence checks and solution updates, but we do not store a full
       // Eigen Jacobian.
@@ -857,12 +870,15 @@ void SparseSystem::reserve(Model* model) {
       // For the PETSc backend, we still build a one-time Eigen Jacobian-style
       // sparsity pattern using the existing system matrices, but we do not
       // keep it around for repeated use.
+      DEBUG_MSG("SparseSystem::reserve - building temporary Eigen jac_pattern");
       Eigen::SparseMatrix<double> jac_pattern(F.rows(), F.cols());
       jac_pattern.reserve(num_triplets.F + num_triplets.E);
       jac_pattern = (E + dC_dydot) + (F + dC_dy);
       jac_pattern.makeCompressed();
+      DEBUG_MSG("SparseSystem::reserve - calling solver->analyze_pattern (PETSc)");
       solver->analyze_pattern(jac_pattern);
     }
+    DEBUG_MSG("SparseSystem::reserve - end on root");
   }
 
   if (!is_root) {
@@ -874,6 +890,7 @@ void SparseSystem::reserve(Model* model) {
     if (backend_ == LinearBackend::Eigen) {
       empty.resize(jacobian.rows(), jacobian.cols());
     }
+    DEBUG_MSG("SparseSystem::reserve - non-root calling solver->analyze_pattern with empty pattern");
     solver->analyze_pattern(empty);
   }
 }
