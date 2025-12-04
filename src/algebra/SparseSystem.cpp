@@ -65,6 +65,15 @@ void ensure_petsc_initialized() {
     initialized = true;
 
 #ifndef NDEBUG
+    // In debug builds, install the PETSc traceback error handler so that
+    // a full stack trace is printed whenever a PETSc error occurs. This
+    // is helpful on batch HPC systems where only log output is available.
+    ierr = PetscPushErrorHandler(PetscTraceBackErrorHandler, nullptr);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to install PETSc traceback error handler");
+    }
+
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
     ierr = PetscLogDefaultBegin();
