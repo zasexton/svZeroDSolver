@@ -4,6 +4,13 @@
 
 #include <chrono>
 
+// Externally defined in src/algebra/SparseSystem.cpp; used only for debugging
+// floating-point exceptions in large models.
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+extern volatile std::size_t svzero_current_block_index;
+#endif
+
 template <typename block_type>
 BlockFactoryFunc block_factory() {
   return [](int count, Model* model) -> Block* {
@@ -258,6 +265,10 @@ void Model::update_solution(SparseSystem& system,
                 << (i + 1) << " / " << n);
       t_last = now;
     }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_block_index = i;
+#endif
     blocks[i]->update_solution(system, parameter_values, y, dy);
   }
   auto t1 = Clock::now();

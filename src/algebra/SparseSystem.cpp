@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
+#include <cstddef>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -31,17 +32,31 @@
 
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-namespace {
-
 static PetscLogStage stage_analyze = 0;
 static PetscLogStage stage_factorize = 0;
 static PetscLogStage stage_solve = 0;
+
+// Global index of the block currently being processed in Model::update_solution
+// (root rank only). This is used purely for debugging floating-point
+// exceptions in large models.
+volatile std::size_t svzero_current_block_index =
+    static_cast<std::size_t>(-1);
+
+namespace {
 
 #if SVZERO_HAVE_EXECINFO
 // Simple SIGFPE handler for debug builds that prints a backtrace to stderr.
 // This is useful on batch HPC systems where interactive debuggers are not
 // available and only log output can be inspected.
 void svzero_sigfpe_handler(int sig) {
+  // Report the last block index being processed on the root rank, if set.
+  if (svzero_current_block_index != static_cast<std::size_t>(-1)) {
+    // Using fprintf here is not strictly async-signal-safe, but is acceptable
+    // for debugging on batch systems where the process is about to abort.
+    std::fprintf(stderr,
+                 "svZeroDSolver SIGFPE while processing block index %zu\n",
+                 svzero_current_block_index);
+  }
   void* frames[64];
   int n = backtrace(frames, 64);
   backtrace_symbols_fd(frames, n, 2);  // 2 = stderr
