@@ -2,6 +2,8 @@
 // University of California, and others. SPDX-License-Identifier: BSD-3-Clause
 #include "Model.h"
 
+#include <chrono>
+
 template <typename block_type>
 BlockFactoryFunc block_factory() {
   return [](int count, Model* model) -> Block* {
@@ -189,10 +191,17 @@ int Model::get_num_blocks(bool internal) const {
 void Model::update_constant(SparseSystem& system) {
   const std::size_t n = blocks.size();
   const std::size_t report_interval = std::max<std::size_t>(1, n / 20);  // ~5% steps
+  using Clock = std::chrono::steady_clock;
+  auto t_last = Clock::now();
   for (std::size_t i = 0; i < n; ++i) {
-    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+    const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
+    const auto now = Clock::now();
+    const bool long_since_last =
+        std::chrono::duration_cast<std::chrono::seconds>(now - t_last).count() >= 5;
+    if (at_interval || long_since_last) {
       DEBUG_MSG("Model::update_constant - processing block "
                 << (i + 1) << " / " << n);
+      t_last = now;
     }
     blocks[i]->update_constant(system, parameter_values);
   }
@@ -207,10 +216,17 @@ void Model::update_time(SparseSystem& system, double time) {
 
   const std::size_t n = blocks.size();
   const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  using Clock = std::chrono::steady_clock;
+  auto t_last = Clock::now();
   for (std::size_t i = 0; i < n; ++i) {
-    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+    const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
+    const auto now = Clock::now();
+    const bool long_since_last =
+        std::chrono::duration_cast<std::chrono::seconds>(now - t_last).count() >= 5;
+    if (at_interval || long_since_last) {
       DEBUG_MSG("Model::update_time - processing block "
                 << (i + 1) << " / " << n);
+      t_last = now;
     }
     blocks[i]->update_time(system, parameter_values);
   }
@@ -221,10 +237,17 @@ void Model::update_solution(SparseSystem& system,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& dy) {
   const std::size_t n = blocks.size();
   const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  using Clock = std::chrono::steady_clock;
+  auto t_last = Clock::now();
   for (std::size_t i = 0; i < n; ++i) {
-    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+    const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
+    const auto now = Clock::now();
+    const bool long_since_last =
+        std::chrono::duration_cast<std::chrono::seconds>(now - t_last).count() >= 5;
+    if (at_interval || long_since_last) {
       DEBUG_MSG("Model::update_solution - processing block "
                 << (i + 1) << " / " << n);
+      t_last = now;
     }
     blocks[i]->update_solution(system, parameter_values, y, dy);
   }
