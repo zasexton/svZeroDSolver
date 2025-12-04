@@ -234,6 +234,55 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
           simparams_.sim_external_step_size / denom;
     }
 
+    // Create junction blocks and their connections now that all vessels and
+    // vessel_id_map_ have been processed. This avoids depending on the
+    // ordering of top-level JSON sections.
+    for (const auto& junction_config : junctions_) {
+      const std::string j_type = junction_config.at("junction_type");
+      const std::string junction_name = junction_config.at("junction_name");
+
+      if (!junction_config.contains("junction_values")) {
+        generate_block(model_, Json::object(), j_type, junction_name);
+      } else {
+        generate_block(model_, junction_config.at("junction_values"), j_type,
+                       junction_name);
+      }
+
+      if (junction_config.contains("inlet_vessels") &&
+          junction_config.contains("outlet_vessels")) {
+        for (int vessel_id : junction_config.at("inlet_vessels")) {
+          auto it = vessel_id_map_.find(vessel_id);
+          if (it == vessel_id_map_.end()) {
+            throw std::runtime_error(
+                "StreamingConfigLoader: junction '" + junction_name +
+                "' references unknown inlet vessel_id " +
+                std::to_string(vessel_id) +
+                " (vessel not defined in 'vessels' section)");
+          }
+          connections_.push_back({it->second, junction_name});
+        }
+        for (int vessel_id : junction_config.at("outlet_vessels")) {
+          auto it = vessel_id_map_.find(vessel_id);
+          if (it == vessel_id_map_.end()) {
+            throw std::runtime_error(
+                "StreamingConfigLoader: junction '" + junction_name +
+                "' references unknown outlet vessel_id " +
+                std::to_string(vessel_id) +
+                " (vessel not defined in 'vessels' section)");
+          }
+          connections_.push_back({junction_name, it->second});
+        }
+      } else if (junction_config.contains("inlet_blocks") &&
+                 junction_config.contains("outlet_blocks")) {
+        for (const auto& block_name : junction_config.at("inlet_blocks")) {
+          connections_.push_back({block_name, junction_name});
+        }
+        for (const auto& block_name : junction_config.at("outlet_blocks")) {
+          connections_.push_back({junction_name, block_name});
+        }
+      }
+    }
+
     // Finalize connections and model.
     for (const auto& conn : connections_) {
       auto ele1 = model_.get_block(std::get<0>(conn));
@@ -305,6 +354,10 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
   std::size_t closed_loop_count_ = 0;
   std::size_t valves_count_ = 0;
   std::size_t chambers_count_ = 0;
+
+  // Junction configs stored for processing in finalize(), after all vessels
+  // have been read and vessel_id_map_ is complete.
+  std::vector<Json> junctions_;
 
   std::string current_key_;
   std::string last_error_;
@@ -596,49 +649,8 @@ class StreamingConfigLoaderSax : public Json::json_sax_t {
   }
 
   void handle_junction(const Json& junction_config) {
-    std::string j_type = junction_config.at("junction_type");
-    std::string junction_name = junction_config.at("junction_name");
-
-    if (!junction_config.contains("junction_values")) {
-      generate_block(model_, Json::object(), j_type, junction_name);
-    } else {
-      generate_block(model_, junction_config.at("junction_values"), j_type,
-                     junction_name);
-    }
-
-    if (junction_config.contains("inlet_vessels") &&
-        junction_config.contains("outlet_vessels")) {
-      for (int vessel_id : junction_config.at("inlet_vessels")) {
-        auto it = vessel_id_map_.find(vessel_id);
-        if (it == vessel_id_map_.end()) {
-          throw std::runtime_error(
-              "StreamingConfigLoader: junction '" + junction_name +
-              "' references unknown inlet vessel_id " +
-              std::to_string(vessel_id) +
-              " (vessel not defined in 'vessels' section)");
-        }
-        connections_.push_back({it->second, junction_name});
-      }
-      for (int vessel_id : junction_config.at("outlet_vessels")) {
-        auto it = vessel_id_map_.find(vessel_id);
-        if (it == vessel_id_map_.end()) {
-          throw std::runtime_error(
-              "StreamingConfigLoader: junction '" + junction_name +
-              "' references unknown outlet vessel_id " +
-              std::to_string(vessel_id) +
-              " (vessel not defined in 'vessels' section)");
-        }
-        connections_.push_back({junction_name, it->second});
-      }
-    } else if (junction_config.contains("inlet_blocks") &&
-               junction_config.contains("outlet_blocks")) {
-      for (const auto& block_name : junction_config.at("inlet_blocks")) {
-        connections_.push_back({block_name, junction_name});
-      }
-      for (const auto& block_name : junction_config.at("outlet_blocks")) {
-        connections_.push_back({junction_name, block_name});
-      }
-    }
+    junctions_.push_back(junction_config);
+    ++junctions_count_;
   }
 
   void handle_closed_loop_block(const Json& closed_loop_config) {
