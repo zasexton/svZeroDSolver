@@ -113,6 +113,7 @@ State Integrator::step(const State& old_state, double time) {
 #endif
 
   if (is_root) {
+    DEBUG_MSG("Integrator::step - begin, time=" << time);
     new_state.ydot += old_state.ydot * ydot_init_coeff;
     new_state.y += old_state.y;
   }
@@ -122,6 +123,7 @@ State Integrator::step(const State& old_state, double time) {
 
   // Evaluate time-dependent element contributions in system
   if (is_root) {
+    DEBUG_MSG("Integrator::step - calling Model::update_time at t=" << new_time);
     model->update_time(system, new_time);
   }
 
@@ -139,10 +141,12 @@ State Integrator::step(const State& old_state, double time) {
       y_af += old_state.y + (new_state.y - old_state.y) * alpha_f;
 
       // Update solution-dependent element contributions
+      DEBUG_MSG("Integrator::step - calling Model::update_solution, iter=" << i);
       model->update_solution(system, y_af, ydot_am);
     }
 
     // Evaluate residual (collective across all ranks when using PETSc).
+    DEBUG_MSG("Integrator::step - calling SparseSystem::update_residual");
     system.update_residual(y_af, ydot_am);
 
     // Check termination criterium (based on residual on the root rank).
@@ -155,6 +159,8 @@ State Integrator::step(const State& old_state, double time) {
     MPI_Bcast(&max_residual, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
 #endif
     if (max_residual < atol) {
+      DEBUG_MSG("Integrator::step - residual below atol, iter=" << i
+                << ", max_residual=" << max_residual);
       break;
     }
 
@@ -166,9 +172,11 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate Jacobian
+    DEBUG_MSG("Integrator::step - calling SparseSystem::update_jacobian");
     system.update_jacobian(alpha_m, y_coeff_jacobian);
 
     // Solve system for increment in ydot
+    DEBUG_MSG("Integrator::step - calling SparseSystem::solve");
     system.solve();
 
     // Perform post-solve actions on blocks
@@ -203,5 +211,8 @@ State Integrator::step(const State& old_state, double time) {
 }
 
 double Integrator::avg_nonlin_iter() {
-  return (double)n_nonlin_iter / (double)n_iter;
+  if (n_iter == 0) {
+    return 0.0;
+  }
+  return static_cast<double>(n_nonlin_iter) / static_cast<double>(n_iter);
 }
