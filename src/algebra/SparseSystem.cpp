@@ -133,6 +133,15 @@ void ensure_petsc_initialized() {
     }
     initialized = true;
 
+    // In debug PETSc builds, floating-point exceptions may be trapped
+    // aggressively inside PETSc itself (for example via FE_DIVBYZERO). This
+    // can cause SIGFPE to be raised on non-root ranks during internal PETSc
+    // setup before our own application code has started a time step. To make
+    // it easier to diagnose issues in the model code, we disable PETSc-level
+    // FP traps here so that invalid operations produce NaNs/Infs instead of
+    // signals; our own residual/Jacobian checks will detect and report them.
+    PetscFPTrapPush(PETSC_FP_TRAP_OFF);
+
     // In debug builds, install the PETSc traceback error handler so that
     // a full stack trace is printed whenever a PETSc error occurs.
     ierr = PetscPushErrorHandler(PetscTraceBackErrorHandler, nullptr);
@@ -142,15 +151,6 @@ void ensure_petsc_initialized() {
     }
 
 #ifndef NDEBUG
-    // Install a SIGFPE handler that reports the current svZeroDSolver phase
-    // and block index before printing a backtrace. This is primarily intended
-    // to catch floating-point exceptions in the model assembly and time
-    // integration code; PETSc errors will still be reported via its own
-    // error handler above.
-#if SVZERO_HAVE_EXECINFO
-    std::signal(SIGFPE, svzero_sigfpe_handler);
-#endif
-
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
     ierr = PetscLogDefaultBegin();
