@@ -38,6 +38,7 @@ using SvZeroIterativePreconditioner =
 
 #include <iostream>
 #include <memory>
+#include <vector>
 
 // Forward declaration of Model
 class Model;
@@ -324,12 +325,30 @@ class SparseSystem {
    */
   void clean();
 
+  // Assembly helpers: use these instead of touching F/E/dC_* directly so that
+  // we can switch between direct coeffRef-based assembly and triplet-based
+  // assembly transparently.
+  void add_F(int row, int col, double value);
+  void add_E(int row, int col, double value);
+  void add_dC_dy(int row, int col, double value);
+  void add_dC_dydot(int row, int col, double value);
+
  private:
   /// Linear solver backend
   std::shared_ptr<LinearSolver> solver;
 
   /// Representation backend (Eigen or PETSc) used by this sparse system.
   LinearBackend backend_ = LinearBackend::Eigen;
+
+  // When true, assembly into F/E/dC_* is performed via triplet lists instead
+  // of direct coeffRef writes. This is enabled during the initial reserve()
+  // phase for large PETSc-based runs to avoid expensive sparse matrix
+  // reallocations when inserting many entries.
+  bool use_triplets_ = false;
+  std::vector<Eigen::Triplet<double>> F_triplets_;
+  std::vector<Eigen::Triplet<double>> E_triplets_;
+  std::vector<Eigen::Triplet<double>> dC_dy_triplets_;
+  std::vector<Eigen::Triplet<double>> dC_dydot_triplets_;
 };
 
 #endif  // SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_

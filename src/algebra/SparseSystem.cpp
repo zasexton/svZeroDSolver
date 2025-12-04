@@ -809,6 +809,46 @@ void SparseSystem::clean() {
   // delete solver;
 }
 
+void SparseSystem::add_F(int row, int col, double value) {
+  const Eigen::Index r = static_cast<Eigen::Index>(row);
+  const Eigen::Index c = static_cast<Eigen::Index>(col);
+  if (use_triplets_) {
+    F_triplets_.emplace_back(r, c, value);
+  } else {
+    F.coeffRef(r, c) = value;
+  }
+}
+
+void SparseSystem::add_E(int row, int col, double value) {
+  const Eigen::Index r = static_cast<Eigen::Index>(row);
+  const Eigen::Index c = static_cast<Eigen::Index>(col);
+  if (use_triplets_) {
+    E_triplets_.emplace_back(r, c, value);
+  } else {
+    E.coeffRef(r, c) = value;
+  }
+}
+
+void SparseSystem::add_dC_dy(int row, int col, double value) {
+  const Eigen::Index r = static_cast<Eigen::Index>(row);
+  const Eigen::Index c = static_cast<Eigen::Index>(col);
+  if (use_triplets_) {
+    dC_dy_triplets_.emplace_back(r, c, value);
+  } else {
+    dC_dy.coeffRef(r, c) = value;
+  }
+}
+
+void SparseSystem::add_dC_dydot(int row, int col, double value) {
+  const Eigen::Index r = static_cast<Eigen::Index>(row);
+  const Eigen::Index c = static_cast<Eigen::Index>(col);
+  if (use_triplets_) {
+    dC_dydot_triplets_.emplace_back(r, c, value);
+  } else {
+    dC_dydot.coeffRef(r, c) = value;
+  }
+}
+
 void SparseSystem::reserve(Model* model) {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
@@ -824,31 +864,19 @@ void SparseSystem::reserve(Model* model) {
               << ", E=" << num_triplets.E
               << ", D=" << num_triplets.D);
 
-    if (backend_ == LinearBackend::PETSc &&
-        num_triplets.F == 0 && num_triplets.E == 0 && num_triplets.D == 0) {
-      // Fallback for very large models where block-level triplet counting is
-      // unavailable or returns zeros: use a simple per-row heuristic to
-      // preallocate Eigen's sparse matrices. This avoids extremely slow
-      // per-entry reallocations when assembling the system for the first time.
-      const Eigen::Index nrows =
-          static_cast<Eigen::Index>(C.size());
-      const Eigen::Index per_row_F = 20;
-      const Eigen::Index per_row_E = 10;
-      const Eigen::Index per_row_D = 10;
-      DEBUG_MSG("SparseSystem::reserve - triplets unknown, using heuristic "
-                "per-row reserve: F~" << per_row_F
-                << ", E~" << per_row_E
-                << ", D~" << per_row_D
-                << " for nrows=" << nrows);
-      F.reserve(per_row_F * nrows);
-      E.reserve(per_row_E * nrows);
-      dC_dy.reserve(per_row_D * nrows);
-      dC_dydot.reserve(per_row_D * nrows);
-    } else {
-      F.reserve(num_triplets.F);
-      E.reserve(num_triplets.E);
-      dC_dy.reserve(num_triplets.D);
-      dC_dydot.reserve(num_triplets.D);
+    F.reserve(num_triplets.F);
+    E.reserve(num_triplets.E);
+    dC_dy.reserve(num_triplets.D);
+    dC_dydot.reserve(num_triplets.D);
+
+    if (backend_ == LinearBackend::PETSc) {
+      // Enable triplet-based assembly for the initial construction of the
+      // system matrices to avoid expensive incremental sparse insertions.
+      use_triplets_ = true;
+      F_triplets_.reserve(static_cast<std::size_t>(num_triplets.F));
+      E_triplets_.reserve(static_cast<std::size_t>(num_triplets.E));
+      dC_dy_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
+      dC_dydot_triplets_.reserve(static_cast<std::size_t>(num_triplets.D));
     }
 
     DEBUG_MSG("SparseSystem::reserve - calling Model::update_constant");
@@ -867,10 +895,47 @@ void SparseSystem::reserve(Model* model) {
     model->update_solution(*this, dummy_y, dummy_dy);
 
     DEBUG_MSG("SparseSystem::reserve - compressing system matrices");
-    F.makeCompressed();
-    E.makeCompressed();
-    dC_dy.makeCompressed();
-    dC_dydot.makeCompressed();
+    if (backend_ == LinearBackend::PETSc && use_triplets_) {
+      // Build Eigen sparse matrices from the assembled triplet lists.
+      const Eigen::Index nrows =
+          static_cast<Eigen::Index>(C.size());
+      const Eigen::Index ncols = nrows;
+      F = Eigen::SparseMatrix<double>(nrows, ncols);
+      E = Eigen::SparseMatrix<double>(nrows, ncols);
+      dC_dy = Eigen::SparseMatrix<double>(nrows, ncols);
+      dC_dydot = Eigen::SparseMatrix<double>(nrows, ncols);
+
+      if (!F_triplets_.empty()) {
+        F.setFromTriplets(F_triplets_.begin(), F_triplets_.end());
+      }
+      if (!E_triplets_.empty()) {
+        E.setFromTriplets(E_triplets_.begin(), E_triplets_.end());
+      }
+      if (!dC_dy_triplets_.empty()) {
+        dC_dy.setFromTriplets(dC_dy_triplets_.begin(), dC_dy_triplets_.end());
+      }
+      if (!dC_dydot_triplets_.empty()) {
+        dC_dydot.setFromTriplets(dC_dydot_triplets_.begin(),
+                                 dC_dydot_triplets_.end());
+      }
+
+      F_triplets_.clear();
+      E_triplets_.clear();
+      dC_dy_triplets_.clear();
+      dC_dydot_triplets_.clear();
+      use_triplets_ = false;
+
+      F.makeCompressed();
+      E.makeCompressed();
+      dC_dy.makeCompressed();
+      dC_dydot.makeCompressed();
+    } else {
+      F.makeCompressed();
+      E.makeCompressed();
+      dC_dy.makeCompressed();
+      dC_dydot.makeCompressed();
+    }
+
     if (backend_ == LinearBackend::Eigen) {
       DEBUG_MSG("SparseSystem::reserve - building Eigen jacobian pattern");
       jacobian.reserve(num_triplets.F + num_triplets.E);  // Just an estimate

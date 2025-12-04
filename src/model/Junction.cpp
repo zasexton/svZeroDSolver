@@ -16,19 +16,19 @@ void Junction::update_constant(SparseSystem& system,
                                std::vector<double>& parameters) {
   // Pressure conservation
   for (size_t i = 0; i < (num_inlets + num_outlets - 1); i++) {
-    system.F.coeffRef(global_eqn_ids[i], global_var_ids[0]) = 1.0;
-    system.F.coeffRef(global_eqn_ids[i], global_var_ids[2 * i + 2]) = -1.0;
+    system.add_F(global_eqn_ids[i], global_var_ids[0], 1.0);
+    system.add_F(global_eqn_ids[i], global_var_ids[2 * i + 2], -1.0);
   }
 
   // Mass conservation
   for (size_t i = 1; i < num_inlets * 2; i = i + 2) {
-    system.F.coeffRef(global_eqn_ids[num_inlets + num_outlets - 1],
-                      global_var_ids[i]) = 1.0;
+    system.add_F(global_eqn_ids[num_inlets + num_outlets - 1],
+                 global_var_ids[i], 1.0);
   }
   for (size_t i = (num_inlets * 2) + 1; i < (num_inlets + num_outlets) * 2;
        i = i + 2) {
-    system.F.coeffRef(global_eqn_ids[num_inlets + num_outlets - 1],
-                      global_var_ids[i]) = -1.0;
+    system.add_F(global_eqn_ids[num_inlets + num_outlets - 1],
+                 global_var_ids[i], -1.0);
   }
 }
 

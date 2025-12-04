@@ -19,15 +19,15 @@ void BloodVessel::update_constant(SparseSystem& system,
   // global_eqn_ids: number of rows in the matrix, set in setup_dofs
   // global_var_ids: number of columns, organized as pressure and flow of all
   // inlets and then all outlets of the block
-  system.E.coeffRef(global_eqn_ids[0], global_var_ids[3]) = -inductance;
-  system.E.coeffRef(global_eqn_ids[1], global_var_ids[0]) = -capacitance;
-  system.E.coeffRef(global_eqn_ids[1], global_var_ids[1]) =
-      capacitance * resistance;
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[0]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[1]) = -resistance;
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[2]) = -1.0;
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[1]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[3]) = -1.0;
+  system.add_E(global_eqn_ids[0], global_var_ids[3], -inductance);
+  system.add_E(global_eqn_ids[1], global_var_ids[0], -capacitance);
+  system.add_E(global_eqn_ids[1], global_var_ids[1],
+               capacitance * resistance);
+  system.add_F(global_eqn_ids[0], global_var_ids[0], 1.0);
+  system.add_F(global_eqn_ids[0], global_var_ids[1], -resistance);
+  system.add_F(global_eqn_ids[0], global_var_ids[2], -1.0);
+  system.add_F(global_eqn_ids[1], global_var_ids[1], 1.0);
+  system.add_F(global_eqn_ids[1], global_var_ids[3], -1.0);
 }
 
 void BloodVessel::update_solution(
@@ -47,13 +47,13 @@ void BloodVessel::update_solution(
   system.C(global_eqn_ids[1]) = stenosis_resistance * 2.0 * capacitance * dq_in;
 
   double sgn_q_in = (0.0 < q_in) - (q_in < 0.0);
-  system.dC_dy.coeffRef(global_eqn_ids[0], global_var_ids[1]) =
-      stenosis_coeff * sgn_q_in * -2.0 * q_in;
-  system.dC_dy.coeffRef(global_eqn_ids[1], global_var_ids[1]) =
-      stenosis_coeff * sgn_q_in * 2.0 * capacitance * dq_in;
+  system.add_dC_dy(global_eqn_ids[0], global_var_ids[1],
+                   stenosis_coeff * sgn_q_in * -2.0 * q_in);
+  system.add_dC_dy(global_eqn_ids[1], global_var_ids[1],
+                   stenosis_coeff * sgn_q_in * 2.0 * capacitance * dq_in);
 
-  system.dC_dydot.coeffRef(global_eqn_ids[1], global_var_ids[1]) =
-      stenosis_resistance * 2.0 * capacitance;
+  system.add_dC_dydot(global_eqn_ids[1], global_var_ids[1],
+                      stenosis_resistance * 2.0 * capacitance);
 }
 
 void BloodVessel::update_gradient(
