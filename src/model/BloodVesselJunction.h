@@ -225,6 +225,8 @@ class BloodVesselJunction : public Block {
    */
   TripletsContributions num_triplets;
 
+  TripletsContributions get_num_triplets() override { return num_triplets; }
+
  private:
   int num_outlets;
 };

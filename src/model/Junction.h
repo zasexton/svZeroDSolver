@@ -142,6 +142,8 @@ class Junction : public Block {
    */
   TripletsContributions num_triplets{0, 0, 0};
 
+  TripletsContributions get_num_triplets() override { return num_triplets; }
+
   /**
    * @brief Number of inlets to the block.
    *

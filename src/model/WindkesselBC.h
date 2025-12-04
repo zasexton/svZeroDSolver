@@ -151,6 +151,8 @@ class WindkesselBC : public Block {
    * (relevant for sparse memory reservation)
    */
   TripletsContributions num_triplets{5, 1, 0};
+
+  TripletsContributions get_num_triplets() override { return num_triplets; }
 };
 
 #endif  // SVZERODSOLVER_MODEL_WINDKESSELBC_HPP_

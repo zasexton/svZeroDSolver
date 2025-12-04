@@ -233,6 +233,8 @@ class ChamberSphere : public Block {
    * (relevant for sparse memory reservation)
    */
   TripletsContributions num_triplets{0, 0, 18};
+
+  TripletsContributions get_num_triplets() override { return num_triplets; }
 };
 
 #endif  // SVZERODSOLVER_MODEL_ChamberSphere_HPP_

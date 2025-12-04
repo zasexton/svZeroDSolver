@@ -123,6 +123,8 @@ class FlowReferenceBC : public Block {
    * (relevant for sparse memory reservation)
    */
   TripletsContributions num_triplets{1, 0, 0};
+
+  TripletsContributions get_num_triplets() override { return num_triplets; }
 };
 
 #endif  // SVZERODSOLVER_MODEL_FLOWREFERENCEBC_HPP_

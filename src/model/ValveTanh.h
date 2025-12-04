@@ -190,6 +190,8 @@ class ValveTanh : public Block {
    * (relevant for sparse memory reservation)
    */
   TripletsContributions num_triplets{5, 0, 3};
+
+  TripletsContributions get_num_triplets() override { return num_triplets; }
 };
 
 #endif  // SVZERODSOLVER_MODEL_VALVETANH_HPP_

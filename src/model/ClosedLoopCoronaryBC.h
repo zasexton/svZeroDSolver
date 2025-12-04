@@ -164,6 +164,8 @@ class ClosedLoopCoronaryBC : public Block {
    */
   TripletsContributions num_triplets{9, 5, 0};
 
+  TripletsContributions get_num_triplets() override { return num_triplets; }
+
  protected:
   int ventricle_var_id;  ///< Variable index of either left or right ventricle
   int im_param_id;       ///< Index of parameter Im

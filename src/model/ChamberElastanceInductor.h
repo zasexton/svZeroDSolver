@@ -208,6 +208,8 @@ class ChamberElastanceInductor : public Block {
    */
   TripletsContributions num_triplets{6, 2, 0};
 
+  TripletsContributions get_num_triplets() override { return num_triplets; }
+
  private:
   double Elas;   // Chamber Elastance
   double Vrest;  // Rest Volume

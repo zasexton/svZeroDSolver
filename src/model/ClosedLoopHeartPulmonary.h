@@ -243,6 +243,8 @@ class ClosedLoopHeartPulmonary : public Block {
    */
   TripletsContributions num_triplets{33, 10, 2};
 
+  TripletsContributions get_num_triplets() override { return num_triplets; }
+
  private:
   // Below variables change every timestep and are then combined with
   // expressions that are updated with solution
