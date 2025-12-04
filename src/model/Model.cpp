@@ -187,8 +187,14 @@ int Model::get_num_blocks(bool internal) const {
 }
 
 void Model::update_constant(SparseSystem& system) {
-  for (auto block : blocks) {
-    block->update_constant(system, parameter_values);
+  const std::size_t n = blocks.size();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);  // ~5% steps
+  for (std::size_t i = 0; i < n; ++i) {
+    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+      DEBUG_MSG("Model::update_constant - processing block "
+                << (i + 1) << " / " << n);
+    }
+    blocks[i]->update_constant(system, parameter_values);
   }
 }
 
@@ -199,16 +205,28 @@ void Model::update_time(SparseSystem& system, double time) {
     parameter_values[param.id] = param.get(time);
   }
 
-  for (auto block : blocks) {
-    block->update_time(system, parameter_values);
+  const std::size_t n = blocks.size();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+      DEBUG_MSG("Model::update_time - processing block "
+                << (i + 1) << " / " << n);
+    }
+    blocks[i]->update_time(system, parameter_values);
   }
 }
 
 void Model::update_solution(SparseSystem& system,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& y,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& dy) {
-  for (auto block : blocks) {
-    block->update_solution(system, parameter_values, y, dy);
+  const std::size_t n = blocks.size();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (i == 0 || (i % report_interval == 0) || i + 1 == n) {
+      DEBUG_MSG("Model::update_solution - processing block "
+                << (i + 1) << " / " << n);
+    }
+    blocks[i]->update_solution(system, parameter_values, y, dy);
   }
 }
 
