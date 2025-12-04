@@ -283,6 +283,27 @@ class Block {
    * @return TripletsContributions Number of triplets of element
    */
   virtual TripletsContributions get_num_triplets();
+
+ protected:
+  /**
+   * @brief Ensure a parameter is strictly positive and finite.
+   *
+   * Throws a std::runtime_error with block and parameter name information if
+   * the value is non-positive or not finite. Returns the value unchanged
+   * otherwise so it can be used inline.
+   */
+  double require_positive_parameter(double value,
+                                    const char* param_name) const;
+
+  /**
+   * @brief Ensure a quantity is not (near) zero and finite.
+   *
+   * Throws a std::runtime_error with block and quantity description if the
+   * value is too close to zero or not finite. Returns the value unchanged
+   * otherwise so it can be used inline.
+   */
+  double require_nonzero_quantity(double value,
+                                  const char* quantity_name) const;
 };
 
 #endif

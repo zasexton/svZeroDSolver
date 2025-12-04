@@ -3,6 +3,9 @@
 
 #include "Block.h"
 
+#include <cmath>
+#include <sstream>
+
 #include "Model.h"
 
 std::string Block::get_name() { return this->model->get_block_name(this->id); }
@@ -70,3 +73,28 @@ void Block::update_gradient(Eigen::SparseMatrix<double>& jacobian,
 }
 
 TripletsContributions Block::get_num_triplets() { return num_triplets; }
+
+double Block::require_positive_parameter(double value,
+                                         const char* param_name) const {
+  if (!std::isfinite(value) || value <= 0.0) {
+    std::ostringstream oss;
+    oss << "Invalid parameter '" << param_name << "' in block '"
+        << model->get_block_name(id) << "': value=" << value
+        << " (must be > 0 and finite)";
+    throw std::runtime_error(oss.str());
+  }
+  return value;
+}
+
+double Block::require_nonzero_quantity(double value,
+                                       const char* quantity_name) const {
+  const double eps = 1e-12;
+  if (!std::isfinite(value) || std::fabs(value) <= eps) {
+    std::ostringstream oss;
+    oss << "Invalid quantity '" << quantity_name << "' in block '"
+        << model->get_block_name(id) << "': value=" << value
+        << " (magnitude must be > " << eps << " and finite)";
+    throw std::runtime_error(oss.str());
+  }
+  return value;
+}

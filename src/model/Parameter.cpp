@@ -2,6 +2,11 @@
 // University of California, and others. SPDX-License-Identifier: BSD-3-Clause
 #include "Parameter.h"
 
+#include <cmath>
+#include <numeric>
+#include <stdexcept>
+#include <sstream>
+
 Parameter::Parameter(int id, double value) {
   this->id = id;
   update(value);
@@ -30,7 +35,31 @@ void Parameter::update(const std::vector<double>& update_times,
   } else {
     times = update_times;
     values = update_values;
+    if (times.size() != values.size()) {
+      std::ostringstream oss;
+      oss << "Parameter " << id
+          << " has mismatched times/values vector sizes: times="
+          << times.size() << ", values=" << values.size();
+      throw std::runtime_error(oss.str());
+    }
+    // Enforce strictly increasing time grid to avoid zero denominators.
+    for (std::size_t i = 1; i < times.size(); ++i) {
+      if (!(times[i] > times[i - 1])) {
+        std::ostringstream oss;
+        oss << "Parameter " << id
+            << " has non-increasing time grid at index " << i
+            << " (t[i-1]=" << times[i - 1]
+            << ", t[i]=" << times[i] << ")";
+        throw std::runtime_error(oss.str());
+      }
+    }
     cycle_period = update_times.back() - update_times[0];
+    if (!std::isfinite(cycle_period) || cycle_period <= 0.0) {
+      std::ostringstream oss;
+      oss << "Parameter " << id
+          << " has non-positive or non-finite cycle_period=" << cycle_period;
+      throw std::runtime_error(oss.str());
+    }
     is_constant = false;
   }
 }
@@ -64,8 +93,18 @@ double Parameter::get(double time) {
 
   // Perform linear interpolation
   // TODO: Implement periodic cubic spline
-  return values[m] +
-         ((values[k] - values[m]) / (times[k] - times[m])) * (rtime - times[m]);
+  const double denom = times[k] - times[m];
+  if (!std::isfinite(denom) || std::fabs(denom) <= 1e-12) {
+    std::ostringstream oss;
+    oss << "Parameter " << id
+        << " has invalid time grid for interpolation: "
+        << "times[k]=" << times[k]
+        << ", times[m]=" << times[m]
+        << ", denom=" << denom;
+    throw std::runtime_error(oss.str());
+  }
+  const double slope = (values[k] - values[m]) / denom;
+  return values[m] + slope * (rtime - times[m]);
 }
 
 void Parameter::to_steady() {

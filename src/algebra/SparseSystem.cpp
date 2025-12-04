@@ -935,6 +935,10 @@ void SparseSystem::reserve(Model* model) {
       dC_dy.makeCompressed();
       dC_dydot.makeCompressed();
     }
+    DEBUG_MSG("SparseSystem::reserve - nonzeros F=" << F.nonZeros()
+              << ", E=" << E.nonZeros()
+              << ", dC_dy=" << dC_dy.nonZeros()
+              << ", dC_dydot=" << dC_dydot.nonZeros());
 
     if (backend_ == LinearBackend::Eigen) {
       DEBUG_MSG("SparseSystem::reserve - building Eigen jacobian pattern");

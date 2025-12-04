@@ -190,9 +190,10 @@ int Model::get_num_blocks(bool internal) const {
 
 void Model::update_constant(SparseSystem& system) {
   const std::size_t n = blocks.size();
-  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);  // ~5% steps
   using Clock = std::chrono::steady_clock;
-  auto t_last = Clock::now();
+  auto t0 = Clock::now();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);  // ~5% steps
+  auto t_last = t0;
   for (std::size_t i = 0; i < n; ++i) {
     const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
     const auto now = Clock::now();
@@ -205,6 +206,9 @@ void Model::update_constant(SparseSystem& system) {
     }
     blocks[i]->update_constant(system, parameter_values);
   }
+  auto t1 = Clock::now();
+  std::chrono::duration<double> dt = t1 - t0;
+  DEBUG_MSG("Model::update_constant - elapsed " << dt.count() << " s");
 }
 
 void Model::update_time(SparseSystem& system, double time) {
@@ -215,9 +219,10 @@ void Model::update_time(SparseSystem& system, double time) {
   }
 
   const std::size_t n = blocks.size();
-  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
   using Clock = std::chrono::steady_clock;
-  auto t_last = Clock::now();
+  auto t0 = Clock::now();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  auto t_last = t0;
   for (std::size_t i = 0; i < n; ++i) {
     const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
     const auto now = Clock::now();
@@ -230,15 +235,19 @@ void Model::update_time(SparseSystem& system, double time) {
     }
     blocks[i]->update_time(system, parameter_values);
   }
+  auto t1 = Clock::now();
+  std::chrono::duration<double> dt = t1 - t0;
+  DEBUG_MSG("Model::update_time - elapsed " << dt.count() << " s");
 }
 
 void Model::update_solution(SparseSystem& system,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& y,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& dy) {
   const std::size_t n = blocks.size();
-  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
   using Clock = std::chrono::steady_clock;
-  auto t_last = Clock::now();
+  auto t0 = Clock::now();
+  const std::size_t report_interval = std::max<std::size_t>(1, n / 20);
+  auto t_last = t0;
   for (std::size_t i = 0; i < n; ++i) {
     const bool at_interval = (i == 0) || (i % report_interval == 0) || (i + 1 == n);
     const auto now = Clock::now();
@@ -251,6 +260,9 @@ void Model::update_solution(SparseSystem& system,
     }
     blocks[i]->update_solution(system, parameter_values, y, dy);
   }
+  auto t1 = Clock::now();
+  std::chrono::duration<double> dt = t1 - t0;
+  DEBUG_MSG("Model::update_solution - elapsed " << dt.count() << " s");
 }
 
 void Model::post_solve(Eigen::Matrix<double, Eigen::Dynamic, 1>& y) {

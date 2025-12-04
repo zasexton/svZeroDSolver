@@ -3,6 +3,9 @@
 
 #include "Integrator.h"
 
+#include <cmath>
+#include <stdexcept>
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
@@ -40,9 +43,18 @@ Integrator::Integrator(Model* model, int system_size, double time_step_size,
                        double rho, double atol, int max_iter)
     : system(SparseSystem(system_size)), model(model) {
   DEBUG_MSG("Integrator::Integrator - begin, system_size=" << system_size);
-  alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho);
-  alpha_f = 1.0 / (1.0 + rho);
+  const double denom_rho = 1.0 + rho;
+  if (!std::isfinite(denom_rho) || std::fabs(denom_rho) <= 1e-12) {
+    throw std::runtime_error(
+        "Integrator::Integrator - invalid rho (1+rho too close to zero)");
+  }
+  alpha_m = 0.5 * (3.0 - rho) / denom_rho;
+  alpha_f = 1.0 / denom_rho;
   gamma = 0.5 + alpha_m - alpha_f;
+  if (!std::isfinite(gamma) || std::fabs(gamma) <= 1e-12) {
+    throw std::runtime_error(
+        "Integrator::Integrator - invalid generalized-alpha gamma (zero or non-finite)");
+  }
   ydot_init_coeff = 1.0 - 1.0 / gamma;
 
   y_coeff = gamma * time_step_size;

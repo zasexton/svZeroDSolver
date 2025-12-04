@@ -59,7 +59,8 @@ void ChamberSphere::update_solution(
   const double thick0 = parameters[global_param_ids[ParamId::thick0]];
   const double sigma_max = parameters[global_param_ids[ParamId::sigma_max]];
 
-  const double radius0 = parameters[global_param_ids[ParamId::radius0]];
+  const double radius0_raw = parameters[global_param_ids[ParamId::radius0]];
+  const double radius0 = require_nonzero_quantity(radius0_raw, "radius0");
   const double velo = y[global_var_ids[5]];
   const double dradius_dt = dy[global_var_ids[4]];
   const double Pout = y[global_var_ids[2]];
@@ -84,7 +85,7 @@ void ChamberSphere::update_solution(
       (dradius_dt * eta * (-2 * pow(radius0, 12) + pow(radius + radius0, 12)) +
        pow(radius + radius0, 5) *
            (-pow(radius0, 6) + pow(radius + radius0, 6)) *
-           (W1 * pow(radius0, 2) + W2 * pow(radius + radius0, 2))) /
+          (W1 * pow(radius0, 2) + W2 * pow(radius + radius0, 2))) /
       (pow(radius0, 2) * pow(radius + radius0, 11));
   system.add_dC_dy(
       global_eqn_ids[1], global_var_ids[4],
@@ -117,11 +118,16 @@ void ChamberSphere::get_elastance_values(std::vector<double>& parameters) {
   const double alpha_min = parameters[global_param_ids[ParamId::alpha_min]];
   const double tsys = parameters[global_param_ids[ParamId::tsys]];
   const double tdias = parameters[global_param_ids[ParamId::tdias]];
-  const double steepness = parameters[global_param_ids[ParamId::steepness]];
+  const double steepness_raw =
+      parameters[global_param_ids[ParamId::steepness]];
+  const double steepness =
+      require_nonzero_quantity(steepness_raw, "steepness");
 
   const double t = model->time;
 
-  const auto T_cardiac = model->cardiac_cycle_period;
+  const auto T_cardiac =
+      require_positive_parameter(model->cardiac_cycle_period,
+                                 "cardiac_cycle_period");
   const auto t_in_cycle = fmod(model->time, T_cardiac);
 
   const double S_plus = 0.5 * (1.0 + tanh((t_in_cycle - tsys) / steepness));

@@ -45,10 +45,13 @@ void ClosedLoopHeartPulmonary::update_constant(
   // DOF 9, Eq 7: Pulmonary pressure
   system.add_E(global_eqn_ids[7], global_var_ids[9],
                parameters[global_param_ids[ParamId::CP]]);
+  const double RPD =
+      require_positive_parameter(
+          parameters[global_param_ids[ParamId::RPD]], "RPD");
   system.add_F(global_eqn_ids[7], global_var_ids[9],
-               1.0 / parameters[global_param_ids[ParamId::RPD]]);
+               1.0 / RPD);
   system.add_F(global_eqn_ids[7], global_var_ids[10],
-               -1.0 / parameters[global_param_ids[ParamId::RPD]]);
+               -1.0 / RPD);
 
   // DOF 10, Eq 8: Left atrium pressure
   system.add_F(global_eqn_ids[8], global_var_ids[10], 1.0);
@@ -170,9 +173,13 @@ void ClosedLoopHeartPulmonary::update_solution(
 
 void ClosedLoopHeartPulmonary::get_activation_and_elastance_functions(
     std::vector<double>& parameters) {
-  auto T_cardiac = model->cardiac_cycle_period;
+  auto T_cardiac = require_positive_parameter(
+      model->cardiac_cycle_period, "cardiac_cycle_period");
   auto Tsa = T_cardiac * parameters[global_param_ids[ParamId::TSA]];
-  auto tpwave = T_cardiac / parameters[global_param_ids[ParamId::TPWAVE]];
+  const double tpwave_scale =
+      require_positive_parameter(
+          parameters[global_param_ids[ParamId::TPWAVE]], "TPWAVE");
+  auto tpwave = T_cardiac / tpwave_scale;
   auto t_in_cycle = fmod(model->time, T_cardiac);
 
   // Activation function
