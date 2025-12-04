@@ -823,10 +823,33 @@ void SparseSystem::reserve(Model* model) {
     DEBUG_MSG("SparseSystem::reserve - triplets F=" << num_triplets.F
               << ", E=" << num_triplets.E
               << ", D=" << num_triplets.D);
-    F.reserve(num_triplets.F);
-    E.reserve(num_triplets.E);
-    dC_dy.reserve(num_triplets.D);
-    dC_dydot.reserve(num_triplets.D);
+
+    if (backend_ == LinearBackend::PETSc &&
+        num_triplets.F == 0 && num_triplets.E == 0 && num_triplets.D == 0) {
+      // Fallback for very large models where block-level triplet counting is
+      // unavailable or returns zeros: use a simple per-row heuristic to
+      // preallocate Eigen's sparse matrices. This avoids extremely slow
+      // per-entry reallocations when assembling the system for the first time.
+      const Eigen::Index nrows =
+          static_cast<Eigen::Index>(C.size());
+      const Eigen::Index per_row_F = 20;
+      const Eigen::Index per_row_E = 10;
+      const Eigen::Index per_row_D = 10;
+      DEBUG_MSG("SparseSystem::reserve - triplets unknown, using heuristic "
+                "per-row reserve: F~" << per_row_F
+                << ", E~" << per_row_E
+                << ", D~" << per_row_D
+                << " for nrows=" << nrows);
+      F.reserve(per_row_F * nrows);
+      E.reserve(per_row_E * nrows);
+      dC_dy.reserve(per_row_D * nrows);
+      dC_dydot.reserve(per_row_D * nrows);
+    } else {
+      F.reserve(num_triplets.F);
+      E.reserve(num_triplets.E);
+      dC_dy.reserve(num_triplets.D);
+      dC_dydot.reserve(num_triplets.D);
+    }
 
     DEBUG_MSG("SparseSystem::reserve - calling Model::update_constant");
     model->update_constant(*this);
