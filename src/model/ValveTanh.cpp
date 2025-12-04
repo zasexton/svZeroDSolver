@@ -19,12 +19,11 @@ void ValveTanh::update_constant(SparseSystem& system,
   // inlets and then all outlets of the block
   double Rmin = parameters[global_param_ids[ParamId::RMIN]];
   double Rmax = parameters[global_param_ids[ParamId::RMAX]];
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[0]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[2]) = -1.0;
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[1]) =
-      -0.5 * (Rmax + Rmin);
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[1]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[3]) = -1.0;
+  system.add_F(global_eqn_ids[0], global_var_ids[0], 1.0);
+  system.add_F(global_eqn_ids[0], global_var_ids[2], -1.0);
+  system.add_F(global_eqn_ids[0], global_var_ids[1], -0.5 * (Rmax + Rmin));
+  system.add_F(global_eqn_ids[1], global_var_ids[1], 1.0);
+  system.add_F(global_eqn_ids[1], global_var_ids[3], -1.0);
 }
 
 // update_solution updates matrices E and F from E(y,t)*y_dot + F(y,t)*y +
@@ -48,12 +47,16 @@ void ValveTanh::update_solution(
       -0.5 * q_in * (Rmax - Rmin) * tanh(steep * (p_out - p_in));
 
   // Derivatives of non-linear term
-  system.dC_dy.coeffRef(global_eqn_ids[0], global_var_ids[0]) =
+  system.add_dC_dy(
+      global_eqn_ids[0], global_var_ids[0],
       0.5 * q_in * (Rmax - Rmin) * steep *
-      (1.0 - tanh(steep * (p_out - p_in)) * tanh(steep * (p_out - p_in)));
-  system.dC_dy.coeffRef(global_eqn_ids[0], global_var_ids[1]) =
-      -0.5 * (Rmax - Rmin) * tanh(steep * (p_out - p_in));
-  system.dC_dy.coeffRef(global_eqn_ids[0], global_var_ids[2]) =
+          (1.0 - tanh(steep * (p_out - p_in)) *
+                     tanh(steep * (p_out - p_in))));
+  system.add_dC_dy(global_eqn_ids[0], global_var_ids[1],
+                   -0.5 * (Rmax - Rmin) * tanh(steep * (p_out - p_in)));
+  system.add_dC_dy(
+      global_eqn_ids[0], global_var_ids[2],
       -0.5 * q_in * (Rmax - Rmin) * steep *
-      (1.0 - tanh(steep * (p_out - p_in)) * tanh(steep * (p_out - p_in)));
+          (1.0 - tanh(steep * (p_out - p_in)) *
+                     tanh(steep * (p_out - p_in))));
 }

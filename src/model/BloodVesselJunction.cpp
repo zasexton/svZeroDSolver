@@ -19,19 +19,19 @@ void BloodVesselJunction::setup_dofs(DOFHandler& dofhandler) {
 void BloodVesselJunction::update_constant(SparseSystem& system,
                                           std::vector<double>& parameters) {
   // Mass conservation
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[1]) = 1.0;
+  system.add_F(global_eqn_ids[0], global_var_ids[1], 1.0);
 
   for (size_t i = 0; i < num_outlets; i++) {
     double inductance = parameters[global_param_ids[num_outlets + i]];
     double resistance = parameters[global_param_ids[i]];
-    system.F.coeffRef(global_eqn_ids[0], global_var_ids[3 + 2 * i]) = -1.0;
-    system.F.coeffRef(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i]) =
-        -resistance;
-    system.F.coeffRef(global_eqn_ids[i + 1], global_var_ids[0]) = 1.0;
-    system.F.coeffRef(global_eqn_ids[i + 1], global_var_ids[2 + 2 * i]) = -1.0;
+    system.add_F(global_eqn_ids[0], global_var_ids[3 + 2 * i], -1.0);
+    system.add_F(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i],
+                 -resistance);
+    system.add_F(global_eqn_ids[i + 1], global_var_ids[0], 1.0);
+    system.add_F(global_eqn_ids[i + 1], global_var_ids[2 + 2 * i], -1.0);
 
-    system.E.coeffRef(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i]) =
-        -inductance;
+    system.add_E(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i],
+                 -inductance);
   }
 }
 
@@ -47,8 +47,8 @@ void BloodVesselJunction::update_solution(
 
     // Mass conservation
     system.C(global_eqn_ids[i + 1]) = -stenosis_resistance * q_out;
-    system.dC_dy.coeffRef(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i]) =
-        -2.0 * stenosis_resistance;
+    system.add_dC_dy(global_eqn_ids[i + 1], global_var_ids[3 + 2 * i],
+                     -2.0 * stenosis_resistance);
   }
 }
 

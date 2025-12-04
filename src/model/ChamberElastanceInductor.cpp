@@ -12,17 +12,17 @@ void ChamberElastanceInductor::update_constant(
   double L = parameters[global_param_ids[ParamId::IMPEDANCE]];
 
   // Eq 0: P_in - E(t)(Vc - Vrest) = 0
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[0]) = 1.0;
+  system.add_F(global_eqn_ids[0], global_var_ids[0], 1.0);
 
   // Eq 1: P_in - P_out - L*dQ_out = 0
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[0]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[1], global_var_ids[2]) = -1.0;
-  system.E.coeffRef(global_eqn_ids[1], global_var_ids[3]) = -L;
+  system.add_F(global_eqn_ids[1], global_var_ids[0], 1.0);
+  system.add_F(global_eqn_ids[1], global_var_ids[2], -1.0);
+  system.add_E(global_eqn_ids[1], global_var_ids[3], -L);
 
   // Eq 2: Q_in - Q_out - dVc = 0
-  system.F.coeffRef(global_eqn_ids[2], global_var_ids[1]) = 1.0;
-  system.F.coeffRef(global_eqn_ids[2], global_var_ids[3]) = -1.0;
-  system.E.coeffRef(global_eqn_ids[2], global_var_ids[4]) = -1.0;
+  system.add_F(global_eqn_ids[2], global_var_ids[1], 1.0);
+  system.add_F(global_eqn_ids[2], global_var_ids[3], -1.0);
+  system.add_E(global_eqn_ids[2], global_var_ids[4], -1.0);
 }
 
 void ChamberElastanceInductor::update_time(SparseSystem& system,
@@ -30,7 +30,7 @@ void ChamberElastanceInductor::update_time(SparseSystem& system,
   get_elastance_values(parameters);
 
   // Eq 0: P_in - E(t)(Vc - Vrest) = P_in - E(t)*Vc + E(t)*Vrest = 0
-  system.F.coeffRef(global_eqn_ids[0], global_var_ids[4]) = -1 * Elas;
+  system.add_F(global_eqn_ids[0], global_var_ids[4], -1.0 * Elas);
   system.C.coeffRef(global_eqn_ids[0]) = Elas * Vrest;
 }
 

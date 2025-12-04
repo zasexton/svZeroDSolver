@@ -19,21 +19,20 @@ void OpenLoopCoronaryBC::update_constant(SparseSystem& system,
     // Equations are:
     // -P_in + (Ra+Ram+Rv)Q_in + Pv = 0
     // V_im = 0
-    system.F.coeffRef(global_eqn_ids[0], global_var_ids[2]) = 1.0;
-    system.F.coeffRef(global_eqn_ids[1], global_var_ids[0]) = -1.0;
-    system.F.coeffRef(global_eqn_ids[1], global_var_ids[1]) = Ra + Ram + Rv;
+    system.add_F(global_eqn_ids[0], global_var_ids[2], 1.0);
+    system.add_F(global_eqn_ids[1], global_var_ids[0], -1.0);
+    system.add_F(global_eqn_ids[1], global_var_ids[1], Ra + Ram + Rv);
   } else {
-    system.F.coeffRef(global_eqn_ids[0], global_var_ids[1]) = Cim * Rv;
-    system.F.coeffRef(global_eqn_ids[0], global_var_ids[2]) = -1.0;
-    system.F.coeffRef(global_eqn_ids[1], global_var_ids[0]) = Cim * Rv;
-    system.F.coeffRef(global_eqn_ids[1], global_var_ids[1]) = -Cim * Rv * Ra;
-    system.F.coeffRef(global_eqn_ids[1], global_var_ids[2]) = -(Rv + Ram);
+    system.add_F(global_eqn_ids[0], global_var_ids[1], Cim * Rv);
+    system.add_F(global_eqn_ids[0], global_var_ids[2], -1.0);
+    system.add_F(global_eqn_ids[1], global_var_ids[0], Cim * Rv);
+    system.add_F(global_eqn_ids[1], global_var_ids[1], -Cim * Rv * Ra);
+    system.add_F(global_eqn_ids[1], global_var_ids[2], -(Rv + Ram));
 
-    system.E.coeffRef(global_eqn_ids[0], global_var_ids[0]) = -Ca * Cim * Rv;
-    system.E.coeffRef(global_eqn_ids[0], global_var_ids[1]) =
-        Ra * Ca * Cim * Rv;
-    system.E.coeffRef(global_eqn_ids[0], global_var_ids[2]) = -Cim * Rv;
-    system.E.coeffRef(global_eqn_ids[1], global_var_ids[2]) = -Cim * Rv * Ram;
+    system.add_E(global_eqn_ids[0], global_var_ids[0], -Ca * Cim * Rv);
+    system.add_E(global_eqn_ids[0], global_var_ids[1], Ra * Ca * Cim * Rv);
+    system.add_E(global_eqn_ids[0], global_var_ids[2], -Cim * Rv);
+    system.add_E(global_eqn_ids[1], global_var_ids[2], -Cim * Rv * Ram);
   }
 }
 
