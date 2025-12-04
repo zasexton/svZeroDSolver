@@ -5,9 +5,17 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+
+#if __has_include(<execinfo.h>)
+#define SVZERO_HAVE_EXECINFO 1
+#include <execinfo.h>
+#else
+#define SVZERO_HAVE_EXECINFO 0
+#endif
 
 #include "Model.h"
 #include "debug.h"
@@ -28,6 +36,19 @@ namespace {
 static PetscLogStage stage_analyze = 0;
 static PetscLogStage stage_factorize = 0;
 static PetscLogStage stage_solve = 0;
+
+#if SVZERO_HAVE_EXECINFO
+// Simple SIGFPE handler for debug builds that prints a backtrace to stderr.
+// This is useful on batch HPC systems where interactive debuggers are not
+// available and only log output can be inspected.
+void svzero_sigfpe_handler(int sig) {
+  void* frames[64];
+  int n = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, n, 2);  // 2 = stderr
+  std::signal(sig, SIG_DFL);
+  raise(sig);
+}
+#endif
 
 // Return true on the rank that owns the global Eigen system (rank 0 in
 // PETSC_COMM_WORLD). If MPI is not yet initialized, treat the caller as root.
@@ -66,13 +87,19 @@ void ensure_petsc_initialized() {
 
 #ifndef NDEBUG
     // In debug builds, install the PETSc traceback error handler so that
-    // a full stack trace is printed whenever a PETSc error occurs. This
-    // is helpful on batch HPC systems where only log output is available.
+    // a full stack trace is printed whenever a PETSc error occurs.
     ierr = PetscPushErrorHandler(PetscTraceBackErrorHandler, nullptr);
     if (ierr) {
       throw std::runtime_error(
           "Failed to install PETSc traceback error handler");
     }
+
+    // Also install a simple SIGFPE handler that prints a backtrace. PETSc's
+    // signal handler prints a brief message, but on batch systems a full
+    // backtrace is often more useful than an interactive debugger.
+#if SVZERO_HAVE_EXECINFO
+    std::signal(SIGFPE, svzero_sigfpe_handler);
+#endif
 
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
