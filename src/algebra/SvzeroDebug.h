@@ -29,7 +29,14 @@ enum : int {
   SVZERO_PHASE_RESERVE_TIME = 2,
   SVZERO_PHASE_RESERVE_SOLUTION = 3,
   SVZERO_PHASE_STEP_TIME = 4,
-  SVZERO_PHASE_STEP_SOLUTION = 5
+  SVZERO_PHASE_STEP_SOLUTION = 5,
+  // Phases within a single nonlinear time step:
+  // - residual assembly (RHS)
+  // - Jacobian assembly
+  // - linear solve
+  SVZERO_PHASE_STEP_RESIDUAL = 6,
+  SVZERO_PHASE_STEP_JACOBIAN = 7,
+  SVZERO_PHASE_STEP_SOLVE = 8
 };
 
 extern volatile int svzero_current_phase;
@@ -37,4 +44,3 @@ extern volatile int svzero_current_phase;
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
 #endif  // SVZERODSOLVER_ALGEBRA_SVZERODEBUG_HPP_
-

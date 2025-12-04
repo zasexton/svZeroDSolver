@@ -7,6 +7,7 @@
 #include <cstring>
 #include <csignal>
 #include <cstddef>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -123,9 +124,7 @@ void ensure_petsc_initialized() {
     initialized = true;
 
     // In debug builds, install the PETSc traceback error handler so that
-    // a full stack trace is printed whenever a PETSc error occurs. We do not
-    // override PETSc's own SIGFPE handler here so that floating-point
-    // exceptions inside PETSc are reported via its normal mechanisms.
+    // a full stack trace is printed whenever a PETSc error occurs.
     ierr = PetscPushErrorHandler(PetscTraceBackErrorHandler, nullptr);
     if (ierr) {
       throw std::runtime_error(
@@ -133,6 +132,15 @@ void ensure_petsc_initialized() {
     }
 
 #ifndef NDEBUG
+    // Install a SIGFPE handler that reports the current svZeroDSolver phase
+    // and block index before printing a backtrace. This is primarily intended
+    // to catch floating-point exceptions in the model assembly and time
+    // integration code; PETSc errors will still be reported via its own
+    // error handler above.
+#if SVZERO_HAVE_EXECINFO
+    std::signal(SIGFPE, svzero_sigfpe_handler);
+#endif
+
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
     ierr = PetscLogDefaultBegin();
@@ -1080,6 +1088,12 @@ void SparseSystem::update_residual(
     Eigen::Matrix<double, Eigen::Dynamic, 1>& ydot) {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  // When using the PETSc GMRES backend, track that we are in the residual
+  // assembly phase of a nonlinear step. This helps pinpoint floating-point
+  // exceptions that occur during residual construction.
+  svzero_current_phase = SVZERO_PHASE_STEP_RESIDUAL;
+  svzero_current_block_index = static_cast<std::size_t>(-1);
+
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
         std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
@@ -1160,6 +1174,23 @@ void SparseSystem::update_residual(
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc RHS assembly");
       }
+      // After assembling the RHS, check for non-finite entries in the
+      // residual vector on the root rank. If any are present, throw an
+      // informative error so that the offending time step can be located.
+      if (is_root_rank()) {
+        for (Eigen::Index i = 0; i < residual.size(); ++i) {
+          const double v = residual[i];
+          if (!std::isfinite(v)) {
+            std::ostringstream oss;
+            oss << "Non-finite entry in residual at index " << i
+                << " value=" << v
+                << " during PETSc residual assembly";
+            throw std::runtime_error(oss.str());
+          }
+        }
+      }
+      svzero_current_phase = SVZERO_PHASE_NONE;
+      svzero_current_block_index = static_cast<std::size_t>(-1);
       return;
     }
   }
@@ -1181,6 +1212,10 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
                                    double time_coeff_y) {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  // Track that we are assembling the Jacobian for a nonlinear step.
+  svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
+  svzero_current_block_index = static_cast<std::size_t>(-1);
+
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
         std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
@@ -1271,6 +1306,8 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc matrix assembly");
       }
+      svzero_current_phase = SVZERO_PHASE_NONE;
+      svzero_current_block_index = static_cast<std::size_t>(-1);
       return;
     }
   }
@@ -1288,6 +1325,14 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
 }
 
 void SparseSystem::solve() {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  // Mark that we are in the linear solve phase of a nonlinear step. This
+  // catches floating-point exceptions that occur inside PETSc's KSPSolve or
+  // factorization routines.
+  svzero_current_phase = SVZERO_PHASE_STEP_SOLVE;
+  svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
   try {
     solver->factorize(jacobian);
     solver->solve(residual, dydot);
@@ -1304,7 +1349,17 @@ void SparseSystem::solve() {
     direct_solver.factorize(jacobian);
     direct_solver.solve(residual, dydot);
 #else
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    svzero_current_phase = SVZERO_PHASE_NONE;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
     throw;
 #endif
   }
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  svzero_current_block_index = static_cast<std::size_t>(-1);
+#endif
 }
