@@ -22,7 +22,9 @@ inline bool interface_is_root_rank() {
     return true;
   }
   int rank = 0;
-  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
+  // may not be initialized yet when this function is called.
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   return rank == 0;
 #else
   return true;
@@ -167,9 +169,10 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Broadcast simulation parameters and system size to all ranks so that they
   // do not need to parse the JSON or build the Model.
+  // NOTE: Use MPI_COMM_WORLD here because PETSc hasn't been initialized yet.
   MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
-            PETSC_COMM_WORLD);
-  MPI_Bcast(&system_size, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+            MPI_COMM_WORLD);
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
 #endif
 
   // Get simulation parameters
@@ -205,28 +208,66 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   interface->num_output_steps_ = num_output_steps;
   DEBUG_MSG("[initialize] System size: " << interface->system_size_);
 
-  // Create steady initial state (root rank only).
-  if (simparams.sim_steady_initial && is_root) {
-    DEBUG_MSG("[initialize] ----- Calculating steady initial condition ----- ");
-    double time_step_size_steady = model->cardiac_cycle_period / 10.0;
-    DEBUG_MSG("[initialize] Create steady model ... ");
+  // Create steady initial state.
+  // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
+  // creation and step() calls because they contain MPI collective operations.
+  if (simparams.sim_steady_initial) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    // For PETSc GMRES, all ranks must participate in collective operations.
+    DEBUG_MSG("[initialize] ----- Calculating steady initial condition (PETSc parallel mode) ----- ");
 
-    auto model_steady = model;
-    model_steady->to_steady();
+    double time_step_size_steady = 0.0;
+    if (is_root) {
+      time_step_size_steady = model->cardiac_cycle_period / 10.0;
+      model->to_steady();
+    }
+    // NOTE: Use MPI_COMM_WORLD because PETSc hasn't been initialized yet.
+    MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // All ranks create Integrator - this triggers MPI collective operations
+    // in analyze_pattern() that ALL ranks must participate in.
     Integrator integrator_steady(
-        model_steady.get(), interface->system_size_, time_step_size_steady,
+        is_root ? model.get() : nullptr,
+        interface->system_size_, time_step_size_steady,
         interface->rho_infty_, interface->absolute_tolerance_,
         interface->max_nliter_);
 
+    // All ranks must participate in step() calls (MPI collectives inside)
     for (size_t i = 0; i < 31; i++) {
       state = integrator_steady.step(state, time_step_size_steady * double(i));
     }
-    model_steady->to_unsteady();
+
+    if (is_root) {
+      model->to_unsteady();
+    }
+#else
+    // Non-PETSc path: only root rank needs to compute
+    if (is_root) {
+      DEBUG_MSG("[initialize] ----- Calculating steady initial condition ----- ");
+      double time_step_size_steady = model->cardiac_cycle_period / 10.0;
+      DEBUG_MSG("[initialize] Create steady model ... ");
+
+      model->to_steady();
+      Integrator integrator_steady(
+          model.get(), interface->system_size_, time_step_size_steady,
+          interface->rho_infty_, interface->absolute_tolerance_,
+          interface->max_nliter_);
+
+      for (size_t i = 0; i < 31; i++) {
+        state = integrator_steady.step(state, time_step_size_steady * double(i));
+      }
+      model->to_unsteady();
+    }
+#endif
   }
 
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
-  // Broadcast initial (possibly steady) state to all ranks.
+  // Broadcast initial state to all ranks (for non-steady or after steady computation).
+  // NOTE: After the steady initial computation above (if it ran), PETSc is now
+  // initialized and PETSC_COMM_WORLD is valid. If steady_initial was false,
+  // PETSc is NOT yet initialized, so we must use MPI_COMM_WORLD to be safe.
   if (!is_root) {
     state = State(interface->system_size_);
   }
@@ -234,12 +275,12 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
             interface->system_size_,
             MPI_DOUBLE,
             0,
-            PETSC_COMM_WORLD);
+            MPI_COMM_WORLD);
   MPI_Bcast(state.ydot.data(),
             interface->system_size_,
             MPI_DOUBLE,
             0,
-            PETSC_COMM_WORLD);
+            MPI_COMM_WORLD);
 #endif
 
   interface->state_ = state;

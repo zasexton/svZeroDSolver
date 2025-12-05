@@ -85,8 +85,11 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
+  // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
+  // hasn't been initialized yet. PETSC_COMM_WORLD is only valid after
+  // PetscInitialize() is called (which happens later in the Integrator).
   MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
-            PETSC_COMM_WORLD);
+            MPI_COMM_WORLD);
   if (!is_root_) {
     DEBUG_MSG("Solver::Solver - non-root received simparams: pts_per_cycle="
               << simparams.sim_pts_per_cycle
@@ -113,22 +116,25 @@ Solver::Solver(const SimulationParameters& simparams_in,
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
+  // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
+  // hasn't been initialized yet. PETSC_COMM_WORLD is only valid after
+  // PetscInitialize() is called (which happens later in the Integrator).
   MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
-            PETSC_COMM_WORLD);
+            MPI_COMM_WORLD);
   // Broadcast initial state so all ranks see the same starting point.
   int system_size = 0;
   if (is_root_) {
     system_size = static_cast<int>(initial_state.y.size());
   }
-  MPI_Bcast(&system_size, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
   if (!is_root_) {
     initial_state = State(system_size);
   }
   if (system_size > 0) {
     MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
-              PETSC_COMM_WORLD);
+              MPI_COMM_WORLD);
     MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
-              PETSC_COMM_WORLD);
+              MPI_COMM_WORLD);
   }
   if (!is_root_) {
     DEBUG_MSG("Solver::Solver(streaming) - non-root received simparams: "
@@ -160,7 +166,9 @@ void Solver::setup_initial() {
       time_step_size_steady = this->model->cardiac_cycle_period / 10.0;
       this->model->to_steady();
     }
-    MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
+    // NOTE: Use MPI_COMM_WORLD here because PETSc hasn't been initialized yet.
+    // PETSc initialization happens when the Integrator is created below.
+    MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
     int system_size = state.y.size();
     // All ranks create Integrator - this triggers MPI collective operations
