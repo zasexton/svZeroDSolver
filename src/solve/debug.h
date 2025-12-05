@@ -80,10 +80,70 @@ inline bool debug_should_print() {
       std::cout << "[DEBUG MESSAGE] " << str << std::endl; \
     }                                                    \
   } while (false)
+
+// Rank-aware debug macro: always prints with rank information.
+// Use this for tracking issues that occur on non-root ranks.
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#define DEBUG_MSG_RANK(str)                                                 \
+  do {                                                                      \
+    int _dbg_rank = -1;                                                     \
+    int _dbg_mpi_init = 0;                                                  \
+    MPI_Initialized(&_dbg_mpi_init);                                        \
+    if (_dbg_mpi_init) {                                                    \
+      MPI_Comm_rank(PETSC_COMM_WORLD, &_dbg_rank);                          \
+    }                                                                       \
+    std::cout << "[DEBUG RANK " << _dbg_rank << "] " << str << std::endl;   \
+    std::cout.flush();                                                      \
+  } while (false)
+
+// Check a value for NaN/Inf and report with context if found.
+#define DEBUG_CHECK_VALUE(val, context)                                     \
+  do {                                                                      \
+    if (!std::isfinite(val)) {                                              \
+      int _dbg_rank = -1;                                                   \
+      int _dbg_mpi_init = 0;                                                \
+      MPI_Initialized(&_dbg_mpi_init);                                      \
+      if (_dbg_mpi_init) {                                                  \
+        MPI_Comm_rank(PETSC_COMM_WORLD, &_dbg_rank);                        \
+      }                                                                     \
+      std::cerr << "[FP ERROR RANK " << _dbg_rank << "] Non-finite value: " \
+                << (val) << " at " << (context) << std::endl;               \
+      std::cerr.flush();                                                    \
+    }                                                                       \
+  } while (false)
+
+// Check an array/vector for NaN/Inf and report with context if found.
+#define DEBUG_CHECK_ARRAY(arr, size, context)                               \
+  do {                                                                      \
+    for (int _i = 0; _i < (size); ++_i) {                                   \
+      if (!std::isfinite((arr)[_i])) {                                      \
+        int _dbg_rank = -1;                                                 \
+        int _dbg_mpi_init = 0;                                              \
+        MPI_Initialized(&_dbg_mpi_init);                                    \
+        if (_dbg_mpi_init) {                                                \
+          MPI_Comm_rank(PETSC_COMM_WORLD, &_dbg_rank);                      \
+        }                                                                   \
+        std::cerr << "[FP ERROR RANK " << _dbg_rank << "] Non-finite value at index " \
+                  << _i << ": " << (arr)[_i] << " in " << (context) << std::endl; \
+        std::cerr.flush();                                                  \
+        break;                                                              \
+      }                                                                     \
+    }                                                                       \
+  } while (false)
+#else
+#define DEBUG_MSG_RANK(str) DEBUG_MSG(str)
+#define DEBUG_CHECK_VALUE(val, context) do {} while (false)
+#define DEBUG_CHECK_ARRAY(arr, size, context) do {} while (false)
+#endif
+
 #else
 #define DEBUG_MSG(str) \
   do {                 \
   } while (false)
+#define DEBUG_MSG_RANK(str) do {} while (false)
+#define DEBUG_CHECK_VALUE(val, context) do {} while (false)
+#define DEBUG_CHECK_ARRAY(arr, size, context) do {} while (false)
 #endif
 
 #endif  // SVZERODSOLVER_HELPERS_DEBUG_HPP_

@@ -6,6 +6,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "debug.h"
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
@@ -188,10 +190,18 @@ State Integrator::step(const State& old_state, double time) {
     double max_residual = 0.0;
     if (is_root) {
       max_residual = system.residual.cwiseAbs().maxCoeff();
+      DEBUG_CHECK_VALUE(max_residual, "max_residual before Bcast");
     }
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    DEBUG_MSG_RANK("Integrator::step - before MPI_Bcast(max_residual), iter=" << i
+                   << ", rank=" << rank << ", max_residual=" << max_residual);
+    svzero_current_phase = SVZERO_PHASE_MPI_BCAST_RESIDUAL;
     MPI_Bcast(&max_residual, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
+    svzero_current_phase = SVZERO_PHASE_NONE;
+    DEBUG_MSG_RANK("Integrator::step - after MPI_Bcast(max_residual), iter=" << i
+                   << ", rank=" << rank << ", max_residual=" << max_residual);
+    DEBUG_CHECK_VALUE(max_residual, "max_residual after Bcast");
 #endif
     if (max_residual < atol) {
       DEBUG_MSG("Integrator::step - residual below atol, iter=" << i
@@ -230,16 +240,84 @@ State Integrator::step(const State& old_state, double time) {
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Broadcast the updated state from the root rank so that all ranks see a
   // consistent state, while only the root performed the updates.
+
+  // Check state for NaN/Inf before broadcast on root
+  if (is_root) {
+    for (Eigen::Index i = 0; i < new_state.y.size(); ++i) {
+      if (!std::isfinite(new_state.y[i])) {
+        std::cerr << "[FP ERROR RANK 0] Non-finite new_state.y[" << i << "]="
+                  << new_state.y[i] << " before broadcast, time=" << time << std::endl;
+        break;
+      }
+    }
+    for (Eigen::Index i = 0; i < new_state.ydot.size(); ++i) {
+      if (!std::isfinite(new_state.ydot[i])) {
+        std::cerr << "[FP ERROR RANK 0] Non-finite new_state.ydot[" << i << "]="
+                  << new_state.ydot[i] << " before broadcast, time=" << time << std::endl;
+        break;
+      }
+    }
+  }
+
+  DEBUG_MSG_RANK("Integrator::step - before MPI_Bcast(state.y), rank=" << rank
+                 << ", y.size=" << new_state.y.size() << ", time=" << time);
+  svzero_current_phase = SVZERO_PHASE_MPI_BCAST_STATE_Y;
   MPI_Bcast(new_state.y.data(),
             static_cast<int>(new_state.y.size()),
             MPI_DOUBLE,
             0,
             PETSC_COMM_WORLD);
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  DEBUG_MSG_RANK("Integrator::step - after MPI_Bcast(state.y), rank=" << rank);
+
+  // Check for NaN/Inf after receiving broadcast on non-root ranks
+  {
+    bool has_nonfinite_y = false;
+    Eigen::Index bad_idx = -1;
+    for (Eigen::Index i = 0; i < new_state.y.size(); ++i) {
+      if (!std::isfinite(new_state.y[i])) {
+        has_nonfinite_y = true;
+        bad_idx = i;
+        break;
+      }
+    }
+    if (has_nonfinite_y) {
+      std::cerr << "[FP ERROR RANK " << rank << "] Non-finite new_state.y[" << bad_idx
+                << "]=" << new_state.y[bad_idx] << " AFTER broadcast, time=" << time
+                << std::endl;
+    }
+  }
+
+  DEBUG_MSG_RANK("Integrator::step - before MPI_Bcast(state.ydot), rank=" << rank
+                 << ", ydot.size=" << new_state.ydot.size());
+  svzero_current_phase = SVZERO_PHASE_MPI_BCAST_STATE_YDOT;
   MPI_Bcast(new_state.ydot.data(),
             static_cast<int>(new_state.ydot.size()),
             MPI_DOUBLE,
             0,
             PETSC_COMM_WORLD);
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  DEBUG_MSG_RANK("Integrator::step - after MPI_Bcast(state.ydot), rank=" << rank);
+
+  // Check for NaN/Inf after receiving broadcast on non-root ranks
+  {
+    bool has_nonfinite_ydot = false;
+    Eigen::Index bad_idx = -1;
+    for (Eigen::Index i = 0; i < new_state.ydot.size(); ++i) {
+      if (!std::isfinite(new_state.ydot[i])) {
+        has_nonfinite_ydot = true;
+        bad_idx = i;
+        break;
+      }
+    }
+    if (has_nonfinite_ydot) {
+      std::cerr << "[FP ERROR RANK " << rank << "] Non-finite new_state.ydot[" << bad_idx
+                << "]=" << new_state.ydot[bad_idx] << " AFTER broadcast, time=" << time
+                << std::endl;
+    }
+  }
+
+  DEBUG_MSG_RANK("Integrator::step - EXIT, rank=" << rank << ", time=" << time);
 #endif
 
   return new_state;

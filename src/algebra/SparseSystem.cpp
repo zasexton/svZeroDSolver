@@ -76,41 +76,30 @@ void svzero_sigfpe_handler(int sig) {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
 
-  // Report the current phase and last block index being processed on the
-  // root rank, if available. Using fprintf/backtrace here is not strictly
-  // async-signal-safe, but is acceptable for debugging on batch systems
-  // where the process is about to abort.
-  const char* phase_str = "none";
-  switch (svzero_current_phase) {
-    case SVZERO_PHASE_RESERVE_CONSTANT:
-      phase_str = "reserve_update_constant";
-      break;
-    case SVZERO_PHASE_RESERVE_TIME:
-      phase_str = "reserve_update_time";
-      break;
-    case SVZERO_PHASE_RESERVE_SOLUTION:
-      phase_str = "reserve_update_solution";
-      break;
-    case SVZERO_PHASE_STEP_TIME:
-      phase_str = "step_update_time";
-      break;
-    case SVZERO_PHASE_STEP_SOLUTION:
-      phase_str = "step_update_solution";
-      break;
-    default:
-      phase_str = "none";
-      break;
-  }
+  // Report the current phase and last block index being processed.
+  // Using fprintf/backtrace here is not strictly async-signal-safe, but is
+  // acceptable for debugging on batch systems where the process is about to abort.
+  const char* phase_str = svzero_phase_to_string(svzero_current_phase);
+
   std::fprintf(stderr,
-               "svZeroDSolver SIGFPE: rank=%d, time=%g, phase=%s, block_index=%zu\n",
+               "====================================================================\n"
+               "svZeroDSolver SIGFPE (Floating Point Exception)\n"
+               "  Rank:        %d\n"
+               "  Time:        %g\n"
+               "  Phase:       %s (code=%d)\n"
+               "  Block Index: %zu\n"
+               "====================================================================\n",
                rank,
                svzero_current_time,
                phase_str,
+               svzero_current_phase,
                svzero_current_block_index);
+  std::fflush(stderr);
 
   void* frames[64];
   int n = backtrace(frames, 64);
   backtrace_symbols_fd(frames, n, 2);  // 2 = stderr
+  std::fflush(stderr);
   std::signal(sig, SIG_DFL);
   raise(sig);
 }
@@ -144,6 +133,8 @@ void ensure_petsc_initialized() {
   };
 
   if (!initialized) {
+    svzero_current_phase = SVZERO_PHASE_PETSC_INIT;
+
     // Disable system-level floating-point exceptions BEFORE PetscInitialize.
     // Some HPC systems (particularly with Intel compilers or certain SLURM
     // configurations) may have FP traps enabled at the OS level. Disabling
@@ -163,6 +154,13 @@ void ensure_petsc_initialized() {
       throw std::runtime_error("Failed to initialize PETSc");
     }
     initialized = true;
+
+    // Get rank info for debug output
+    int rank = 0, comm_size = 0;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+    DEBUG_MSG_RANK("ensure_petsc_initialized - PetscInitialize complete, rank="
+                   << rank << "/" << comm_size);
 
     // PETSc may enable floating-point traps (SIGFPE) based on the initial
     // environment and the -fp_trap option. This is useful for catching
@@ -229,6 +227,7 @@ void ensure_petsc_initialized() {
       PetscLogStageRegister("svzero_factorize", &stage_factorize);
       PetscLogStageRegister("svzero_solve", &stage_solve);
       log_stages_registered = true;
+      DEBUG_MSG_RANK("ensure_petsc_initialized - log stages registered, rank=" << rank);
     }
 
     // Ensure PETSc is finalized on clean exit.
@@ -236,6 +235,9 @@ void ensure_petsc_initialized() {
       std::atexit(finalize_petsc);
       registered_finalize = true;
     }
+
+    svzero_current_phase = SVZERO_PHASE_NONE;
+    DEBUG_MSG_RANK("ensure_petsc_initialized - complete, rank=" << rank);
   }
 }
 
@@ -454,6 +456,12 @@ void PetscGMRESLinearSolver::analyze_pattern(
   PetscLogStagePush(stage_analyze);
   const bool root = is_root_rank();
 
+  int rank = 0, comm_size_dbg = 0;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size_dbg);
+  DEBUG_MSG_RANK("PetscGMRESLinearSolver::analyze_pattern - ENTER, rank=" << rank
+                 << "/" << comm_size_dbg << ", is_root=" << (root ? "yes" : "no"));
+
   // Determine the global system size on the root rank and broadcast it to all
   // ranks so that PETSc can create distributed objects consistently.
   PetscInt n_global = 0;
@@ -461,9 +469,14 @@ void PetscGMRESLinearSolver::analyze_pattern(
     DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - computing per-row nnz from Eigen pattern");
     n_global = static_cast<PetscInt>(A.rows());
   }
+  DEBUG_MSG_RANK("analyze_pattern - before MPI_Bcast(n_global), rank=" << rank
+                 << ", local n_global=" << n_global);
+  svzero_current_phase = SVZERO_PHASE_MPI_SCATTER_NNZ;
   MPI_Bcast(&n_global, 1, MPIU_INT, 0, PETSC_COMM_WORLD);
+  svzero_current_phase = SVZERO_PHASE_NONE;
   n_ = n_global;
-  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - global size n_=" << n_);
+  DEBUG_MSG_RANK("analyze_pattern - after MPI_Bcast(n_global), rank=" << rank
+                 << ", n_=" << n_);
 
   if (A_ != nullptr) {
     MatDestroy(&A_);
@@ -594,18 +607,24 @@ void PetscGMRESLinearSolver::analyze_pattern(
   }
 
   // Distribute the exact per-row nnz to each rank.
-  DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - scattering per-row nnz to all ranks");
+  DEBUG_MSG_RANK("analyze_pattern - before MPI_Scatterv(diag_nnz), rank=" << comm_rank
+                 << ", n_local=" << n_local);
+  svzero_current_phase = SVZERO_PHASE_MPI_SCATTER_NNZ;
   MPI_Scatterv(root ? diag_nnz_global.data() : nullptr,
                sendcounts.data(), displs.data(), MPIU_INT,
                diag_nnz_local.data(),
                static_cast<int>(n_local),
                MPIU_INT, 0, PETSC_COMM_WORLD);
+  DEBUG_MSG_RANK("analyze_pattern - after MPI_Scatterv(diag_nnz), rank=" << comm_rank);
 
+  DEBUG_MSG_RANK("analyze_pattern - before MPI_Scatterv(off_nnz), rank=" << comm_rank);
   MPI_Scatterv(root ? off_nnz_global.data() : nullptr,
                sendcounts.data(), displs.data(), MPIU_INT,
                off_nnz_local.data(),
                static_cast<int>(n_local),
                MPIU_INT, 0, PETSC_COMM_WORLD);
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  DEBUG_MSG_RANK("analyze_pattern - after MPI_Scatterv(off_nnz), rank=" << comm_rank);
 
   // Create a distributed AIJ matrix and matching distributed vectors using the
   // exact per-row diagonal/off-diagonal nonzero counts for preallocation.
@@ -728,7 +747,10 @@ void PetscGMRESLinearSolver::factorize(
 void PetscGMRESLinearSolver::solve(
     const Eigen::Matrix<double, Eigen::Dynamic, 1>& b,
     Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
-  DEBUG_MSG("PetscGMRESLinearSolver::solve - begin");
+  int rank = 0;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  DEBUG_MSG_RANK("PetscGMRESLinearSolver::solve - ENTER, rank=" << rank);
+
   PetscLogStagePush(stage_solve);
   if (ksp_ == nullptr || x_ == nullptr || b_ == nullptr) {
     throw std::runtime_error("PETSc GMRES solver not initialized");
@@ -738,14 +760,52 @@ void PetscGMRESLinearSolver::solve(
   // vector argument is ignored for the PETSc backend.
   (void)b;
 
+  // Check for NaN/Inf in the RHS vector before solving (on local portion).
+  {
+    const PetscScalar* b_arr = nullptr;
+    PetscInt b_local_size = 0;
+    VecGetLocalSize(b_, &b_local_size);
+    VecGetArrayRead(b_, &b_arr);
+    bool has_nonfinite = false;
+    PetscInt bad_idx = -1;
+    PetscScalar bad_val = 0.0;
+    for (PetscInt i = 0; i < b_local_size; ++i) {
+      if (!std::isfinite(static_cast<double>(b_arr[i]))) {
+        has_nonfinite = true;
+        bad_idx = i;
+        bad_val = b_arr[i];
+        break;
+      }
+    }
+    VecRestoreArrayRead(b_, &b_arr);
+    if (has_nonfinite) {
+      std::ostringstream oss;
+      oss << "[RANK " << rank << "] Non-finite value in RHS vector b_ at local index "
+          << bad_idx << " (global ~" << (rstart_ + bad_idx) << "): " << bad_val
+          << " before KSPSolve. time=" << svzero_current_time;
+      std::cerr << oss.str() << std::endl;
+      std::cerr.flush();
+    }
+    DEBUG_MSG_RANK("solve - RHS check complete, rank=" << rank
+                   << ", local_size=" << b_local_size
+                   << ", has_nonfinite=" << (has_nonfinite ? "YES" : "no"));
+  }
+
   PetscErrorCode ierr = VecSet(x_, 0.0);
   if (ierr) {
     throw std::runtime_error("Failed to zero PETSc solution vector");
   }
 
+  DEBUG_MSG_RANK("solve - before KSPSolve, rank=" << rank);
+  svzero_current_phase = SVZERO_PHASE_PETSC_KSP_SOLVE;
   ierr = KSPSolve(ksp_, b_, x_);
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  DEBUG_MSG_RANK("solve - after KSPSolve, rank=" << rank << ", ierr=" << ierr);
+
   if (ierr) {
-    throw std::runtime_error("PETSc KSPSolve failed");
+    std::ostringstream oss;
+    oss << "[RANK " << rank << "] PETSc KSPSolve failed with ierr=" << ierr;
+    throw std::runtime_error(oss.str());
   }
 
   KSPConvergedReason reason;
@@ -754,17 +814,51 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error("Failed to get PETSc KSP convergence reason");
   }
 
-  if (reason < 0) {
-    PetscInt its = 0;
-    PetscReal rnorm = 0.0;
-    KSPGetIterationNumber(ksp_, &its);
-    KSPGetResidualNorm(ksp_, &rnorm);
+  PetscInt its = 0;
+  PetscReal rnorm = 0.0;
+  KSPGetIterationNumber(ksp_, &its);
+  KSPGetResidualNorm(ksp_, &rnorm);
+  DEBUG_MSG_RANK("solve - KSP result: rank=" << rank
+                 << ", reason=" << static_cast<int>(reason)
+                 << ", iterations=" << its
+                 << ", residual_norm=" << rnorm);
 
+  if (reason < 0) {
     std::ostringstream oss;
     oss << "PETSc GMRES solve failed. reason=" << static_cast<int>(reason)
         << ", iterations=" << static_cast<int>(its)
         << ", residual=" << static_cast<double>(rnorm);
     throw std::runtime_error(oss.str());
+  }
+
+  // Check for NaN/Inf in solution vector after solve (on local portion).
+  {
+    const PetscScalar* x_arr = nullptr;
+    PetscInt x_local_size = 0;
+    VecGetLocalSize(x_, &x_local_size);
+    VecGetArrayRead(x_, &x_arr);
+    bool has_nonfinite = false;
+    PetscInt bad_idx = -1;
+    PetscScalar bad_val = 0.0;
+    for (PetscInt i = 0; i < x_local_size; ++i) {
+      if (!std::isfinite(static_cast<double>(x_arr[i]))) {
+        has_nonfinite = true;
+        bad_idx = i;
+        bad_val = x_arr[i];
+        break;
+      }
+    }
+    VecRestoreArrayRead(x_, &x_arr);
+    if (has_nonfinite) {
+      std::ostringstream oss;
+      oss << "[RANK " << rank << "] Non-finite value in solution x_ at local index "
+          << bad_idx << " (global ~" << (rstart_ + bad_idx) << "): " << bad_val
+          << " after KSPSolve. time=" << svzero_current_time;
+      std::cerr << oss.str() << std::endl;
+      std::cerr.flush();
+    }
+    DEBUG_MSG_RANK("solve - solution check complete, rank=" << rank
+                   << ", has_nonfinite=" << (has_nonfinite ? "YES" : "no"));
   }
 
   // Scatter the distributed PETSc solution onto a sequential vector on the
@@ -773,6 +867,8 @@ void PetscGMRESLinearSolver::solve(
     throw std::runtime_error("PETSc GMRES scatter to root not initialized");
   }
 
+  DEBUG_MSG_RANK("solve - before VecScatter, rank=" << rank);
+  svzero_current_phase = SVZERO_PHASE_MPI_VEC_SCATTER;
   ierr = VecScatterBegin(scatter_to_root_, x_, x_seq_, INSERT_VALUES,
                          SCATTER_FORWARD);
   if (ierr) {
@@ -780,6 +876,9 @@ void PetscGMRESLinearSolver::solve(
   }
   ierr = VecScatterEnd(scatter_to_root_, x_, x_seq_, INSERT_VALUES,
                        SCATTER_FORWARD);
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  DEBUG_MSG_RANK("solve - after VecScatter, rank=" << rank);
+
   if (ierr) {
     throw std::runtime_error("Failed to end PETSc VecScatter to root");
   }
@@ -792,16 +891,26 @@ void PetscGMRESLinearSolver::solve(
     }
 
     x.resize(static_cast<Eigen::Index>(n_));
+    bool has_nonfinite_seq = false;
     for (PetscInt i = 0; i < n_; ++i) {
       x[static_cast<Eigen::Index>(i)] = static_cast<double>(px[i]);
+      if (!std::isfinite(static_cast<double>(px[i]))) {
+        if (!has_nonfinite_seq) {
+          std::cerr << "[RANK 0] Non-finite in sequential solution at index " << i
+                    << ": " << px[i] << std::endl;
+          has_nonfinite_seq = true;
+        }
+      }
     }
 
     ierr = VecRestoreArrayRead(x_seq_, &px);
     if (ierr) {
       throw std::runtime_error("Failed to restore PETSc sequential solution");
     }
+    DEBUG_MSG_RANK("solve - copied solution to Eigen, has_nonfinite="
+                   << (has_nonfinite_seq ? "YES" : "no"));
   }
-  DEBUG_MSG("PetscGMRESLinearSolver::solve - end");
+  DEBUG_MSG_RANK("PetscGMRESLinearSolver::solve - EXIT, rank=" << rank);
   PetscLogStagePop();
 }
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
@@ -1168,11 +1277,48 @@ void SparseSystem::update_residual(
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
 #endif
-  DEBUG_MSG("SparseSystem::update_residual - rank=" << rank
-                                                    << ", backend="
-                                                    << (backend_ == LinearBackend::PETSc
-                                                            ? "PETSc"
-                                                            : "Eigen"));
+  DEBUG_MSG_RANK("SparseSystem::update_residual - ENTER, rank=" << rank
+                 << ", backend=" << (backend_ == LinearBackend::PETSc ? "PETSc" : "Eigen")
+                 << ", time=" << svzero_current_time);
+
+  // Check input vectors for NaN/Inf on root rank
+  if (is_root_rank()) {
+    bool y_has_nonfinite = false;
+    bool ydot_has_nonfinite = false;
+    Eigen::Index bad_y_idx = -1, bad_ydot_idx = -1;
+    double bad_y_val = 0.0, bad_ydot_val = 0.0;
+
+    for (Eigen::Index i = 0; i < y.size(); ++i) {
+      if (!std::isfinite(y[i])) {
+        y_has_nonfinite = true;
+        bad_y_idx = i;
+        bad_y_val = y[i];
+        break;
+      }
+    }
+    for (Eigen::Index i = 0; i < ydot.size(); ++i) {
+      if (!std::isfinite(ydot[i])) {
+        ydot_has_nonfinite = true;
+        bad_ydot_idx = i;
+        bad_ydot_val = ydot[i];
+        break;
+      }
+    }
+
+    if (y_has_nonfinite) {
+      std::cerr << "[FP ERROR RANK " << rank << "] Non-finite y[" << bad_y_idx
+                << "]=" << bad_y_val << " in update_residual input, time="
+                << svzero_current_time << std::endl;
+    }
+    if (ydot_has_nonfinite) {
+      std::cerr << "[FP ERROR RANK " << rank << "] Non-finite ydot[" << bad_ydot_idx
+                << "]=" << bad_ydot_val << " in update_residual input, time="
+                << svzero_current_time << std::endl;
+    }
+    DEBUG_MSG_RANK("update_residual - input check: y_size=" << y.size()
+                   << ", y_has_nonfinite=" << (y_has_nonfinite ? "YES" : "no")
+                   << ", ydot_has_nonfinite=" << (ydot_has_nonfinite ? "YES" : "no"));
+  }
 
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
@@ -1246,14 +1392,49 @@ void SparseSystem::update_residual(
         }
       }
 
+      DEBUG_MSG_RANK("update_residual - before VecAssembly, rank=" << rank);
+      svzero_current_phase = SVZERO_PHASE_MPI_VEC_ASSEMBLY;
       ierr = VecAssemblyBegin(b);
       if (ierr) {
         throw std::runtime_error("Failed to begin PETSc RHS assembly");
       }
       ierr = VecAssemblyEnd(b);
+      svzero_current_phase = SVZERO_PHASE_STEP_RESIDUAL;
+      DEBUG_MSG_RANK("update_residual - after VecAssembly, rank=" << rank);
+
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc RHS assembly");
       }
+
+      // Check local portion of PETSc vector for NaN/Inf on all ranks
+      {
+        const PetscScalar* b_arr = nullptr;
+        PetscInt b_local_size = 0;
+        VecGetLocalSize(b, &b_local_size);
+        VecGetArrayRead(b, &b_arr);
+        bool has_nonfinite = false;
+        PetscInt bad_idx = -1;
+        PetscScalar bad_val = 0.0;
+        for (PetscInt i = 0; i < b_local_size; ++i) {
+          if (!std::isfinite(static_cast<double>(b_arr[i]))) {
+            has_nonfinite = true;
+            bad_idx = i;
+            bad_val = b_arr[i];
+            break;
+          }
+        }
+        VecRestoreArrayRead(b, &b_arr);
+        if (has_nonfinite) {
+          std::cerr << "[FP ERROR RANK " << rank << "] Non-finite in PETSc RHS at local index "
+                    << bad_idx << ": " << bad_val << " after VecAssembly, time="
+                    << svzero_current_time << std::endl;
+          std::cerr.flush();
+        }
+        DEBUG_MSG_RANK("update_residual - PETSc vec check: rank=" << rank
+                       << ", local_size=" << b_local_size
+                       << ", has_nonfinite=" << (has_nonfinite ? "YES" : "no"));
+      }
+
       // After assembling the RHS, check for non-finite entries in the
       // residual vector on the root rank. If any are present, throw an
       // informative error so that the offending time step can be located.
@@ -1262,13 +1443,15 @@ void SparseSystem::update_residual(
           const double v = residual[i];
           if (!std::isfinite(v)) {
             std::ostringstream oss;
-            oss << "Non-finite entry in residual at index " << i
+            oss << "Non-finite entry in Eigen residual at index " << i
                 << " value=" << v
-                << " during PETSc residual assembly";
+                << " during PETSc residual assembly, time=" << svzero_current_time;
+            std::cerr << "[FP ERROR RANK 0] " << oss.str() << std::endl;
             throw std::runtime_error(oss.str());
           }
         }
       }
+      DEBUG_MSG_RANK("update_residual - EXIT (PETSc path), rank=" << rank);
       svzero_current_phase = SVZERO_PHASE_NONE;
       svzero_current_block_index = static_cast<std::size_t>(-1);
       return;
@@ -1306,11 +1489,19 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
 #endif
-  DEBUG_MSG("SparseSystem::update_jacobian - rank=" << rank
-                                                    << ", backend="
-                                                    << (backend_ == LinearBackend::PETSc
-                                                            ? "PETSc"
-                                                            : "Eigen"));
+  DEBUG_MSG_RANK("SparseSystem::update_jacobian - ENTER, rank=" << rank
+                 << ", backend=" << (backend_ == LinearBackend::PETSc ? "PETSc" : "Eigen")
+                 << ", time_coeff_ydot=" << time_coeff_ydot
+                 << ", time_coeff_y=" << time_coeff_y
+                 << ", time=" << svzero_current_time);
+
+  // Check coefficients for NaN/Inf
+  if (!std::isfinite(time_coeff_ydot) || !std::isfinite(time_coeff_y)) {
+    std::cerr << "[FP ERROR RANK " << rank << "] Non-finite Jacobian coefficients: "
+              << "time_coeff_ydot=" << time_coeff_ydot
+              << ", time_coeff_y=" << time_coeff_y
+              << ", time=" << svzero_current_time << std::endl;
+  }
 
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
@@ -1394,14 +1585,35 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
         }
       }
 
+      DEBUG_MSG_RANK("update_jacobian - before MatAssembly, rank=" << rank);
+      svzero_current_phase = SVZERO_PHASE_MPI_MAT_ASSEMBLY;
       ierr = MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY);
       if (ierr) {
         throw std::runtime_error("Failed to begin PETSc matrix assembly");
       }
       ierr = MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY);
+      svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
+      DEBUG_MSG_RANK("update_jacobian - after MatAssembly, rank=" << rank);
+
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc matrix assembly");
       }
+
+      // Check the matrix norm for sanity (detect NaN propagation in matrix)
+      {
+        PetscReal mat_norm = 0.0;
+        MatNorm(A, NORM_FROBENIUS, &mat_norm);
+        if (!std::isfinite(static_cast<double>(mat_norm))) {
+          std::cerr << "[FP ERROR RANK " << rank << "] Non-finite matrix norm: "
+                    << mat_norm << " after MatAssembly, time=" << svzero_current_time
+                    << std::endl;
+          std::cerr.flush();
+        }
+        DEBUG_MSG_RANK("update_jacobian - matrix Frobenius norm=" << mat_norm
+                       << ", rank=" << rank);
+      }
+
+      DEBUG_MSG_RANK("update_jacobian - EXIT (PETSc path), rank=" << rank);
       svzero_current_phase = SVZERO_PHASE_NONE;
       svzero_current_block_index = static_cast<std::size_t>(-1);
       return;
