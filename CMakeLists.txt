@@ -37,6 +37,11 @@ message(STATUS "Using Python: ${Python_EXECUTABLE} (${Python_VERSION})")
 # Enable code coverage
 # -----------------------------------------------------------------------------
 set(ENABLE_COVERAGE OFF CACHE BOOL "Enable code coverage")
+
+# Enable verbose DEBUG_MSG output from all MPI ranks instead of just the root.
+# This is a debugging aid for PETSc/MPI issues; leave OFF for normal runs.
+set(SVZERODSOLVER_DEBUG_ALL_RANKS OFF CACHE BOOL
+    "Emit DEBUG_MSG output from all MPI ranks (not just rank 0)")
 # coverage
 if(ENABLE_COVERAGE)
   # set compiler flags
@@ -280,6 +285,20 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
     target_link_libraries(svzerodcalibrator PRIVATE mpi mpi_cxx)
     target_link_libraries(pysvzerod         PRIVATE mpi mpi_cxx)
   endif()
+endif()
+
+# If requested, emit DEBUG_MSG output from all MPI ranks instead of only the
+# root rank. This is useful when debugging PETSc/MPI behavior; it is only
+# effective in non-release builds where DEBUG_MSG is enabled.
+if(SVZERODSOLVER_DEBUG_ALL_RANKS)
+  foreach(_tgt svzerodsolver svzerodcalibrator pysvzerod
+               svzero_algebra_library svzero_model_library
+               svzero_solve_library svzero_interface)
+    if(TARGET ${_tgt})
+      target_compile_definitions(${_tgt} PRIVATE
+        SVZERODSOLVER_DEBUG_ALL_RANKS)
+    endif()
+  endforeach()
 endif()
 
 # Expose the chosen linear solver name to all application targets for logging.

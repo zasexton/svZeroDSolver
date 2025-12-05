@@ -26,6 +26,12 @@
 namespace svzero {
 namespace detail {
 inline bool debug_should_print() {
+#if defined(SVZERODSOLVER_DEBUG_ALL_RANKS)
+  // Compile-time option: when SVZERODSOLVER_DEBUG_ALL_RANKS is defined via
+  // CMake, emit DEBUG_MSG output from every MPI rank.
+  return true;
+#endif
+
   // Optional override: when SVZERO_DEBUG_ALL_RANKS is set to a nonzero
   // value, emit DEBUG_MSG output from every MPI rank instead of only the
   // root rank. This is useful for diagnosing PETSc/MPI issues on

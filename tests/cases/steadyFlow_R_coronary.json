@@ -53,7 +53,8 @@
     "simulation_parameters": {
         "number_of_cardiac_cycles": 30,
         "number_of_time_pts_per_cardiac_cycle": 101,
-        "absolute_tolerance": 1e-09
+        "absolute_tolerance": 1e-09,
+        "steady_initial": true
     },
     "vessels": [
         {
