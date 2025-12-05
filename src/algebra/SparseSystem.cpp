@@ -19,6 +19,24 @@
 #define SVZERO_HAVE_EXECINFO 0
 #endif
 
+// Check for GNU extension to disable floating-point exceptions.
+// The fedisableexcept() function is a GNU extension available on Linux
+// that allows us to disable FP exception traps at the system level.
+#if defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <fenv.h>
+// Check if fedisableexcept is available (it's declared when _GNU_SOURCE is set)
+#if defined(__GLIBC__) || defined(FE_ALL_EXCEPT)
+#define SVZERO_HAVE_FEDISABLEEXCEPT 1
+#endif
+#else
+// On non-Linux systems, include standard fenv for feclearexcept
+#include <cfenv>
+#define SVZERO_HAVE_FEDISABLEEXCEPT 0
+#endif
+
 #include "SvzeroDebug.h"
 #include "Model.h"
 #include "debug.h"
@@ -126,6 +144,19 @@ void ensure_petsc_initialized() {
   };
 
   if (!initialized) {
+    // Disable system-level floating-point exceptions BEFORE PetscInitialize.
+    // Some HPC systems (particularly with Intel compilers or certain SLURM
+    // configurations) may have FP traps enabled at the OS level. Disabling
+    // them here ensures that PETSc initialization and subsequent operations
+    // don't trigger SIGFPE on non-root ranks during collective operations.
+#if SVZERO_HAVE_FEDISABLEEXCEPT
+    // Clear any pending FP exceptions first
+    feclearexcept(FE_ALL_EXCEPT);
+    // Disable all FP exception traps (GNU extension)
+    fedisableexcept(FE_ALL_EXCEPT);
+    DEBUG_MSG("ensure_petsc_initialized - disabled system FP exceptions");
+#endif
+
     DEBUG_MSG("ensure_petsc_initialized - calling PetscInitialize");
     PetscErrorCode ierr = PetscInitialize(nullptr, nullptr, nullptr, nullptr);
     if (ierr) {
@@ -145,6 +176,13 @@ void ensure_petsc_initialized() {
     if (ierr) {
       throw std::runtime_error("Failed to disable PETSc FP traps");
     }
+
+    // After PetscSetFPTrap, also ensure system-level traps are disabled again
+    // in case PetscInitialize or PetscSetFPTrap re-enabled them.
+#if SVZERO_HAVE_FEDISABLEEXCEPT
+    feclearexcept(FE_ALL_EXCEPT);
+    fedisableexcept(FE_ALL_EXCEPT);
+#endif
 
     // In debug builds, install the PETSc traceback error handler so that
     // a full stack trace is printed whenever a PETSc error occurs.
