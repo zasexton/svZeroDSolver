@@ -155,6 +155,15 @@ void ensure_petsc_initialized() {
     }
 
 #ifndef NDEBUG
+    // In debug builds, install a SIGFPE handler that reports the current
+    // svZeroDSolver phase, time, and block index before printing a
+    // backtrace. PETSc-level FP traps are disabled above so that this
+    // handler is the primary mechanism for diagnosing floating-point
+    // exceptions.
+#if SVZERO_HAVE_EXECINFO
+    std::signal(SIGFPE, svzero_sigfpe_handler);
+#endif
+
     // Start the default logging handler so that -log_view can safely
     // generate a summary at PetscFinalize in newer PETSc versions.
     ierr = PetscLogDefaultBegin();
