@@ -278,12 +278,11 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   endforeach()
 
   if(SVZERODSOLVER_PETSC_WITH_MPI)
-    # PETSc was configured with a real MPI implementation. Link the common MPI
-    # libraries directly instead of relying on CMake's FindMPI, which can be
-    # fragile with some MPI wrappers and CMake versions.
-    target_link_libraries(svzerodsolver     PRIVATE mpi mpi_cxx)
-    target_link_libraries(svzerodcalibrator PRIVATE mpi mpi_cxx)
-    target_link_libraries(pysvzerod         PRIVATE mpi mpi_cxx)
+    # PETSc was configured with a real MPI implementation. Use the MPI::MPI_CXX
+    # imported target which was found in src/algebra/CMakeLists.txt.
+    target_link_libraries(svzerodsolver     PRIVATE MPI::MPI_CXX)
+    target_link_libraries(svzerodcalibrator PRIVATE MPI::MPI_CXX)
+    target_link_libraries(pysvzerod         PRIVATE MPI::MPI_CXX)
   endif()
 endif()
 

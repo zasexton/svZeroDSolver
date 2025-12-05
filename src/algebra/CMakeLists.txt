@@ -235,25 +235,18 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
     # mpiuni provides its own mpi.h under PETSc include.
     target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS}/mpiuni)
   elseif(_svzero_petscconf_header AND NOT _svzero_petsc_have_mpiuni)
-    # PETSc was built with a real MPI. Avoid CMake's FindMPI here (which can be
-    # fragile with some MPI wrappers and CMake versions) and instead locate
-    # mpi.h directly and link the common MPI libraries.
-    find_path(SVZERODSOLVER_MPI_INCLUDE mpi.h
-      HINTS ENV MPI_HOME ENV MPIROOT ENV I_MPI_ROOT
-      PATHS /usr/lib/x86_64-linux-gnu/openmpi/include
-            /usr/lib/openmpi/include
-            /usr/local/include
-            /usr/include
-      PATH_SUFFIXES include include/openmpi)
-    if(NOT SVZERODSOLVER_MPI_INCLUDE)
+    # PETSc was built with a real MPI. Use CMake's FindMPI to properly locate
+    # both headers and libraries, handling non-standard installation paths.
+    find_package(MPI REQUIRED COMPONENTS CXX)
+    if(NOT MPI_CXX_FOUND)
       message(FATAL_ERROR
-        "PETSc was built with MPI support, but mpi.h was not found. "
+        "PETSc was built with MPI support, but MPI was not found. "
         "Install MPI development headers (e.g., openmpi-dev or mpich) or "
         "set MPI_HOME to your MPI installation.")
     endif()
 
-    target_include_directories(${lib} PUBLIC ${SVZERODSOLVER_MPI_INCLUDE})
-    target_link_libraries(${lib} PUBLIC mpi mpi_cxx)
+    target_include_directories(${lib} PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+    target_link_libraries(${lib} PUBLIC MPI::MPI_CXX)
     set(SVZERODSOLVER_PETSC_WITH_MPI TRUE PARENT_SCOPE)
   endif()
 
