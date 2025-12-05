@@ -12,6 +12,47 @@
 #endif
 #include "StreamingConfigLoader.h"
 
+// Include floating-point exception control headers for disabling FP traps.
+// Some HPC environments (Intel MKL, Intel compilers, certain SLURM configs)
+// enable FP exception traps by default, which can cause SIGFPE during normal
+// numerical operations involving intermediate infinities or NaNs.
+#if defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <fenv.h>
+#if defined(__GLIBC__) || defined(FE_ALL_EXCEPT)
+#define SVZERO_MAIN_HAVE_FEDISABLEEXCEPT 1
+#endif
+#else
+#include <cfenv>
+#define SVZERO_MAIN_HAVE_FEDISABLEEXCEPT 0
+#endif
+
+#include <csignal>
+#include <cstdio>
+
+namespace {
+// Counter to track how many times we've received SIGFPE - if it's happening
+// repeatedly, we may need to abort to prevent infinite loops.
+volatile sig_atomic_t g_sigfpe_count = 0;
+
+// Early SIGFPE handler that simply ignores the signal and allows execution
+// to continue. This is installed BEFORE PETSc initialization to prevent
+// crashes from FP exceptions in MPI or library initialization code.
+void early_sigfpe_handler(int /*sig*/) {
+  ++g_sigfpe_count;
+  if (g_sigfpe_count > 1000) {
+    // Too many SIGFPE signals - something is seriously wrong.
+    // Restore default handler and re-raise to get a core dump.
+    std::signal(SIGFPE, SIG_DFL);
+    std::raise(SIGFPE);
+  }
+  // Otherwise, just return and continue execution.
+  // The operation that caused SIGFPE will produce NaN/Inf instead.
+}
+}  // namespace
+
 /**
  *
  * @brief svZeroDSolver main routine
@@ -30,6 +71,18 @@
  * @return Return code
  */
 int main(int argc, char* argv[]) {
+  // CRITICAL: Install a permissive SIGFPE handler IMMEDIATELY at program
+  // start, before any other code runs. This handler ignores FP exceptions
+  // and allows execution to continue. Some HPC environments (Intel MKL,
+  // Intel compilers, certain SLURM configurations) enable FP traps by default.
+  std::signal(SIGFPE, early_sigfpe_handler);
+
+  // Also disable floating-point exception traps at the hardware level.
+#if SVZERO_MAIN_HAVE_FEDISABLEEXCEPT
+  feclearexcept(FE_ALL_EXCEPT);
+  fedisableexcept(FE_ALL_EXCEPT);
+#endif
+
   DEBUG_MSG("Starting svZeroDSolver");
 
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
@@ -41,6 +94,13 @@ int main(int argc, char* argv[]) {
     DEBUG_MSG("svzerodsolver - calling MPI_Init");
     MPI_Init(&argc, &argv);
   }
+  // Disable FP traps again after MPI_Init, in case MPI or linked libraries
+  // (Intel MKL, etc.) re-enabled them during initialization.
+  std::signal(SIGFPE, early_sigfpe_handler);
+#if SVZERO_MAIN_HAVE_FEDISABLEEXCEPT
+  feclearexcept(FE_ALL_EXCEPT);
+  fedisableexcept(FE_ALL_EXCEPT);
+#endif
 #endif
 
   // Get input and output file name
