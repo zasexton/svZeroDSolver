@@ -205,9 +205,17 @@ Solver::Solver(const SimulationParameters& simparams_in,
   DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
             << " after Bcast system_size=" << system_size);
 
+  // ALWAYS print this to stderr to diagnose MPI broadcast issues
+  std::cerr << "[RANK " << rank << "] Solver(streaming): system_size=" << system_size
+            << ", is_root=" << (is_root_ ? "true" : "false")
+            << ", time_step_size=" << simparams.sim_time_step_size << std::endl;
+  std::cerr.flush();
+
   if (system_size == 0) {
-    std::cerr << "[RANK " << rank << "] WARNING: system_size=0 after broadcast! "
-              << "is_root=" << (is_root_ ? "true" : "false") << std::endl;
+    std::cerr << "[RANK " << rank << "] FATAL: system_size=0 after broadcast! "
+              << "MPI broadcasts may have failed. Aborting." << std::endl;
+    std::cerr.flush();
+    MPI_Abort(MPI_COMM_WORLD, 1);
   }
 
   if (!is_root_) {
