@@ -122,6 +122,17 @@ State Integrator::step(const State& old_state, double time) {
   const bool is_root = integrator_is_root_rank();
   // Track the current physical time for debug reporting on all ranks.
   svzero_current_time = time;
+  int rank = 0;
+#if defined(MPI_VERSION)
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+#endif
+  DEBUG_MSG("Integrator::step - rank=" << rank
+                                       << ", is_root=" << (is_root ? "true" : "false")
+                                       << ", time=" << time);
 #else
   const bool is_root = true;
 #endif

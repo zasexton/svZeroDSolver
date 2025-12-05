@@ -1158,6 +1158,22 @@ void SparseSystem::update_residual(
   svzero_current_phase = SVZERO_PHASE_STEP_RESIDUAL;
   svzero_current_block_index = static_cast<std::size_t>(-1);
 
+  // Emit a per-rank debug message so that we can see how non-root ranks
+  // participate in PETSc residual assembly when debugging MPI/PETSc issues.
+  int rank = 0;
+#if defined(MPI_VERSION)
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+#endif
+  DEBUG_MSG("SparseSystem::update_residual - rank=" << rank
+                                                    << ", backend="
+                                                    << (backend_ == LinearBackend::PETSc
+                                                            ? "PETSc"
+                                                            : "Eigen"));
+
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
         std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
@@ -1280,6 +1296,22 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
   svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
   svzero_current_block_index = static_cast<std::size_t>(-1);
 
+  // Emit a per-rank debug message so that we can see how non-root ranks
+  // participate in PETSc Jacobian assembly when debugging MPI/PETSc issues.
+  int rank = 0;
+#if defined(MPI_VERSION)
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+#endif
+  DEBUG_MSG("SparseSystem::update_jacobian - rank=" << rank
+                                                    << ", backend="
+                                                    << (backend_ == LinearBackend::PETSc
+                                                            ? "PETSc"
+                                                            : "Eigen"));
+
   if (backend_ == LinearBackend::PETSc) {
     auto petsc_solver =
         std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
@@ -1396,6 +1428,22 @@ void SparseSystem::solve() {
   // factorization routines.
   svzero_current_phase = SVZERO_PHASE_STEP_SOLVE;
   svzero_current_block_index = static_cast<std::size_t>(-1);
+
+  // Emit a per-rank debug message so that we can see how non-root ranks
+  // participate in the PETSc linear solve when debugging MPI/PETSc issues.
+  int rank = 0;
+#if defined(MPI_VERSION)
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  }
+#endif
+  DEBUG_MSG("SparseSystem::solve - rank=" << rank
+                                          << ", backend="
+                                          << (backend_ == LinearBackend::PETSc
+                                                  ? "PETSc"
+                                                  : "Eigen"));
 #endif
   try {
     solver->factorize(jacobian);

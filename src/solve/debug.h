@@ -26,6 +26,16 @@
 namespace svzero {
 namespace detail {
 inline bool debug_should_print() {
+  // Optional override: when SVZERO_DEBUG_ALL_RANKS is set to a nonzero
+  // value, emit DEBUG_MSG output from every MPI rank instead of only the
+  // root rank. This is useful for diagnosing PETSc/MPI issues on
+  // non-root ranks.
+  if (const char* all = std::getenv("SVZERO_DEBUG_ALL_RANKS")) {
+    if (std::atoi(all) != 0) {
+      return true;
+    }
+  }
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   PetscBool petsc_init = PETSC_FALSE;
