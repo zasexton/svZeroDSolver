@@ -90,10 +90,32 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
   // PetscInitialize() is called (which happens later in the Integrator).
   MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
             MPI_COMM_WORLD);
+
+  // Broadcast initial state so all ranks have the correct system size.
+  // This is critical: non-root ranks need to know the system size to
+  // participate in MPI collective operations during Integrator setup.
+  int system_size = 0;
+  if (is_root_) {
+    system_size = static_cast<int>(initial_state.y.size());
+  }
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  DEBUG_MSG("Solver::Solver - broadcast system_size=" << system_size);
+
+  if (!is_root_) {
+    initial_state = State(system_size);
+  }
+  if (system_size > 0) {
+    MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
+              MPI_COMM_WORLD);
+    MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
+              MPI_COMM_WORLD);
+  }
+
   if (!is_root_) {
     DEBUG_MSG("Solver::Solver - non-root received simparams: pts_per_cycle="
               << simparams.sim_pts_per_cycle
-              << ", num_time_steps=" << simparams.sim_num_time_steps);
+              << ", num_time_steps=" << simparams.sim_num_time_steps
+              << ", initial_state.y.size=" << initial_state.y.size());
   }
 #endif
 
