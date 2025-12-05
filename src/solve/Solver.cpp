@@ -160,14 +160,56 @@ Solver::Solver(const SimulationParameters& simparams_in,
   simparams = simparams_in;
   initial_state = initial_state_in;
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  // ALWAYS print this to help diagnose issues - no preprocessor guards
+  std::cerr << "[Solver::Solver(streaming)] ENTER is_root=" << (is_root_ ? "true" : "false")
+            << ", initial_state.y.size=" << initial_state.y.size() << std::endl;
+
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   int rank = 0;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  DEBUG_MSG("Solver::Solver(streaming) - ENTER, rank=" << rank
-            << ", is_root=" << (is_root_ ? "true" : "false")
-            << ", input initial_state.y.size=" << initial_state_in.y.size()
-            << ", local initial_state.y.size=" << initial_state.y.size());
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  }
+  std::cerr << "[RANK " << rank << "] Solver(streaming) MPI path active, mpi_initialized="
+            << mpi_initialized << std::endl;
+
+  if (mpi_initialized) {
+    // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
+    std::cerr << "[RANK " << rank << "] Before Bcast simparams" << std::endl;
+    int mpi_err = MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
+                            MPI_COMM_WORLD);
+    std::cerr << "[RANK " << rank << "] After Bcast simparams, err=" << mpi_err
+              << ", time_step_size=" << simparams.sim_time_step_size << std::endl;
+
+    // Broadcast initial state so all ranks see the same starting point.
+    int system_size = 0;
+    if (is_root_) {
+      system_size = static_cast<int>(initial_state.y.size());
+    }
+    std::cerr << "[RANK " << rank << "] Before Bcast system_size, local=" << system_size << std::endl;
+    mpi_err = MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    std::cerr << "[RANK " << rank << "] After Bcast system_size=" << system_size
+              << ", err=" << mpi_err << std::endl;
+
+    if (system_size == 0) {
+      std::cerr << "[RANK " << rank << "] FATAL: system_size=0 after broadcast!" << std::endl;
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    if (!is_root_) {
+      initial_state = State(system_size);
+      std::cerr << "[RANK " << rank << "] Created State with size=" << initial_state.y.size() << std::endl;
+    }
+
+    std::cerr << "[RANK " << rank << "] Before Bcast y/ydot data" << std::endl;
+    mpi_err = MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
+                        MPI_COMM_WORLD);
+    mpi_err = MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
+                        MPI_COMM_WORLD);
+    std::cerr << "[RANK " << rank << "] After Bcast y/ydot, initial_state.y.size="
+              << initial_state.y.size() << std::endl;
+  }
 #endif
 
   if (is_root_ && this->model) {
@@ -175,73 +217,7 @@ Solver::Solver(const SimulationParameters& simparams_in,
               << this->model->dofhandler.size());
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
-  // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
-  // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
-  // hasn't been initialized yet. PETSC_COMM_WORLD is only valid after
-  // PetscInitialize() is called (which happens later in the Integrator).
-  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank << " before Bcast simparams");
-  int mpi_err = MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
-                          MPI_COMM_WORLD);
-  if (mpi_err != MPI_SUCCESS) {
-    std::cerr << "[RANK " << rank << "] MPI_Bcast simparams failed with error " << mpi_err << std::endl;
-  }
-  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank << " after Bcast simparams"
-            << ", pts_per_cycle=" << simparams.sim_pts_per_cycle
-            << ", time_step_size=" << simparams.sim_time_step_size);
-
-  // Broadcast initial state so all ranks see the same starting point.
-  int system_size = 0;
-  if (is_root_) {
-    system_size = static_cast<int>(initial_state.y.size());
-  }
-  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-            << " before Bcast system_size, local=" << system_size);
-  mpi_err = MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  if (mpi_err != MPI_SUCCESS) {
-    std::cerr << "[RANK " << rank << "] MPI_Bcast system_size failed with error " << mpi_err << std::endl;
-  }
-  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-            << " after Bcast system_size=" << system_size);
-
-  // ALWAYS print this to stderr to diagnose MPI broadcast issues
-  std::cerr << "[RANK " << rank << "] Solver(streaming): system_size=" << system_size
-            << ", is_root=" << (is_root_ ? "true" : "false")
-            << ", time_step_size=" << simparams.sim_time_step_size << std::endl;
-  std::cerr.flush();
-
-  if (system_size == 0) {
-    std::cerr << "[RANK " << rank << "] FATAL: system_size=0 after broadcast! "
-              << "MPI broadcasts may have failed. Aborting." << std::endl;
-    std::cerr.flush();
-    MPI_Abort(MPI_COMM_WORLD, 1);
-  }
-
-  if (!is_root_) {
-    initial_state = State(system_size);
-    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-              << " created State with size=" << initial_state.y.size());
-  }
-  if (system_size > 0) {
-    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-              << " before Bcast y/ydot data");
-    mpi_err = MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
-                        MPI_COMM_WORLD);
-    if (mpi_err != MPI_SUCCESS) {
-      std::cerr << "[RANK " << rank << "] MPI_Bcast y failed with error " << mpi_err << std::endl;
-    }
-    mpi_err = MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
-                        MPI_COMM_WORLD);
-    if (mpi_err != MPI_SUCCESS) {
-      std::cerr << "[RANK " << rank << "] MPI_Bcast ydot failed with error " << mpi_err << std::endl;
-    }
-    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-              << " after Bcast y/ydot, y[0]=" << initial_state.y[0]);
-  }
-  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
-            << " EXIT, initial_state.y.size=" << initial_state.y.size());
-#endif
+  std::cerr << "[Solver::Solver(streaming)] EXIT initial_state.y.size=" << initial_state.y.size() << std::endl;
 }
 
 void Solver::setup_initial() {
