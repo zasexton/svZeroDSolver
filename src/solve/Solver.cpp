@@ -9,6 +9,9 @@
 #if __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
+#if __has_include(<petscsys.h>)
+#include <petscsys.h>
+#endif
 #endif
 
 Solver::Solver(const nlohmann::json& config) : Solver(config, true) {}
@@ -141,12 +144,43 @@ void Solver::setup_initial() {
             << ", is_root=" << (is_root_ ? "true" : "false"));
   state = initial_state;
 
-  // Create steady initial condition (root rank only when using PETSc GMRES).
+  // Create steady initial condition.
+  // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
+  // creation and step() calls because they contain MPI collective operations.
   if (simparams.sim_steady_initial) {
-    if (!is_root_) {
-      // Non-root ranks will receive the steady state via broadcasts inside the
-      // PETSc-based Integrator::step calls.
-    } else {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    // For PETSc GMRES, all ranks must participate in collective operations.
+    // Root rank does actual computation; non-root ranks participate in MPI collectives.
+    DEBUG_MSG("Calculate steady initial condition (PETSc parallel mode)");
+
+    // Broadcast time_step_size_steady from root to all ranks
+    double time_step_size_steady = 0.0;
+    if (is_root_) {
+      time_step_size_steady = this->model->cardiac_cycle_period / 10.0;
+      this->model->to_steady();
+    }
+    MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
+
+    int system_size = state.y.size();
+    // All ranks create Integrator - this triggers MPI collective operations
+    // in analyze_pattern() that ALL ranks must participate in.
+    Integrator integrator_steady(is_root_ ? this->model.get() : nullptr,
+                                 system_size, time_step_size_steady,
+                                 simparams.sim_rho_infty,
+                                 simparams.sim_abs_tol, simparams.sim_nliter);
+
+    // All ranks must participate in step() calls (MPI collectives inside)
+    for (int i = 0; i < 31; i++) {
+      state = integrator_steady.step(state, time_step_size_steady * double(i));
+    }
+
+    if (is_root_) {
+      this->model->to_unsteady();
+    }
+#else
+    // Non-PETSc path: only root rank needs to compute
+    if (is_root_) {
       DEBUG_MSG("Calculate steady initial condition");
       double time_step_size_steady = this->model->cardiac_cycle_period / 10.0;
       this->model->to_steady();
@@ -162,6 +196,7 @@ void Solver::setup_initial() {
 
       this->model->to_unsteady();
     }
+#endif
   }
 
   // Use the initial condition (steady or user-provided) to set up parameters
