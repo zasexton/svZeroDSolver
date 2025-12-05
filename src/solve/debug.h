@@ -44,10 +44,20 @@ inline bool debug_should_print() {
 
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  // First, check if PETSc is initialized and use PETSC_COMM_WORLD
   PetscBool petsc_init = PETSC_FALSE;
   if (PetscInitialized(&petsc_init) == 0 && petsc_init) {
     int rank = 0;
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    return rank == 0;
+  }
+
+  // If PETSc isn't initialized yet, check if MPI is initialized and use MPI_COMM_WORLD
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     return rank == 0;
   }
 #endif

@@ -14,11 +14,41 @@
 #endif
 #endif
 
-Solver::Solver(const nlohmann::json& config) : Solver(config, true) {}
+Solver::Solver(const nlohmann::json& config)
+    : Solver(config, []() {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+        // Determine if this rank is root (rank 0) for MPI runs.
+        // Use MPI_COMM_WORLD because PETSc isn't initialized yet.
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+          int rank = 0;
+          MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+          return rank == 0;
+        }
+#endif
+        return true;  // Non-MPI or MPI not initialized: assume root
+      }()) {}
 
 Solver::Solver(const nlohmann::json& config, bool is_root)
     : is_root_(is_root) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  {
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    int rank = -1;
+    if (mpi_initialized) {
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+    DEBUG_MSG("Solver::Solver - begin, is_root=" << (is_root_ ? "true" : "false")
+              << ", mpi_initialized=" << mpi_initialized
+              << ", mpi_rank=" << rank);
+  }
+#else
   DEBUG_MSG("Solver::Solver - begin, is_root=" << (is_root_ ? "true" : "false"));
+#endif
 
   if (is_root_) {
     validate_input(config);
@@ -130,6 +160,16 @@ Solver::Solver(const SimulationParameters& simparams_in,
   simparams = simparams_in;
   initial_state = initial_state_in;
 
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  int rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  DEBUG_MSG("Solver::Solver(streaming) - ENTER, rank=" << rank
+            << ", is_root=" << (is_root_ ? "true" : "false")
+            << ", input initial_state.y.size=" << initial_state_in.y.size()
+            << ", local initial_state.y.size=" << initial_state.y.size());
+#endif
+
   if (is_root_ && this->model) {
     DEBUG_MSG("Solver::Solver(streaming) - root, dofs="
               << this->model->dofhandler.size());
@@ -141,36 +181,81 @@ Solver::Solver(const SimulationParameters& simparams_in,
   // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
   // hasn't been initialized yet. PETSC_COMM_WORLD is only valid after
   // PetscInitialize() is called (which happens later in the Integrator).
-  MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
-            MPI_COMM_WORLD);
+  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank << " before Bcast simparams");
+  int mpi_err = MPI_Bcast(&simparams, sizeof(SimulationParameters), MPI_BYTE, 0,
+                          MPI_COMM_WORLD);
+  if (mpi_err != MPI_SUCCESS) {
+    std::cerr << "[RANK " << rank << "] MPI_Bcast simparams failed with error " << mpi_err << std::endl;
+  }
+  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank << " after Bcast simparams"
+            << ", pts_per_cycle=" << simparams.sim_pts_per_cycle
+            << ", time_step_size=" << simparams.sim_time_step_size);
+
   // Broadcast initial state so all ranks see the same starting point.
   int system_size = 0;
   if (is_root_) {
     system_size = static_cast<int>(initial_state.y.size());
   }
-  MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+            << " before Bcast system_size, local=" << system_size);
+  mpi_err = MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  if (mpi_err != MPI_SUCCESS) {
+    std::cerr << "[RANK " << rank << "] MPI_Bcast system_size failed with error " << mpi_err << std::endl;
+  }
+  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+            << " after Bcast system_size=" << system_size);
+
+  if (system_size == 0) {
+    std::cerr << "[RANK " << rank << "] WARNING: system_size=0 after broadcast! "
+              << "is_root=" << (is_root_ ? "true" : "false") << std::endl;
+  }
+
   if (!is_root_) {
     initial_state = State(system_size);
+    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+              << " created State with size=" << initial_state.y.size());
   }
   if (system_size > 0) {
-    MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
-              MPI_COMM_WORLD);
-    MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
-              MPI_COMM_WORLD);
+    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+              << " before Bcast y/ydot data");
+    mpi_err = MPI_Bcast(initial_state.y.data(), system_size, MPI_DOUBLE, 0,
+                        MPI_COMM_WORLD);
+    if (mpi_err != MPI_SUCCESS) {
+      std::cerr << "[RANK " << rank << "] MPI_Bcast y failed with error " << mpi_err << std::endl;
+    }
+    mpi_err = MPI_Bcast(initial_state.ydot.data(), system_size, MPI_DOUBLE, 0,
+                        MPI_COMM_WORLD);
+    if (mpi_err != MPI_SUCCESS) {
+      std::cerr << "[RANK " << rank << "] MPI_Bcast ydot failed with error " << mpi_err << std::endl;
+    }
+    DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+              << " after Bcast y/ydot, y[0]=" << initial_state.y[0]);
   }
-  if (!is_root_) {
-    DEBUG_MSG("Solver::Solver(streaming) - non-root received simparams: "
-              "pts_per_cycle=" << simparams.sim_pts_per_cycle
-              << ", num_time_steps=" << simparams.sim_num_time_steps);
-  }
+  DEBUG_MSG("Solver::Solver(streaming) - rank=" << rank
+            << " EXIT, initial_state.y.size=" << initial_state.y.size());
 #endif
 }
 
 void Solver::setup_initial() {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  int rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  DEBUG_MSG("Solver::setup_initial - ENTER, rank=" << rank
+            << ", is_root=" << (is_root_ ? "true" : "false")
+            << ", initial_state.y.size=" << initial_state.y.size()
+            << ", steady_initial=" << (simparams.sim_steady_initial ? "true" : "false"));
+#else
   DEBUG_MSG("Solver::setup_initial - begin, steady_initial="
             << (simparams.sim_steady_initial ? "true" : "false")
             << ", is_root=" << (is_root_ ? "true" : "false"));
+#endif
   state = initial_state;
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  DEBUG_MSG("Solver::setup_initial - rank=" << rank
+            << ", state.y.size after copy=" << state.y.size());
+#endif
 
   // Create steady initial condition.
   // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
@@ -240,8 +325,19 @@ void Solver::setup_initial() {
 
 void Solver::setup_integrator() {
   // Set-up integrator
-  DEBUG_MSG("Solver::setup_integrator - begin");
   int system_size = state.y.size();
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  int rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  DEBUG_MSG("Solver::setup_integrator - ENTER, rank=" << rank
+            << ", is_root=" << (is_root_ ? "true" : "false")
+            << ", state.y.size=" << system_size
+            << ", time_step_size=" << simparams.sim_time_step_size);
+#else
+  DEBUG_MSG("Solver::setup_integrator - begin");
+#endif
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   integrator = Integrator(is_root_ ? this->model.get() : nullptr,
