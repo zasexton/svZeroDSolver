@@ -274,7 +274,27 @@ void Solver::setup_initial() {
     // PETSc initialization happens when the Integrator is created below.
     MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    int system_size = state.y.size();
+    // Broadcast system_size from root to all ranks. On non-root ranks, the
+    // state member may not be properly initialized even though initial_state
+    // was broadcast in the constructor. This ensures all ranks use the same
+    // system size for PETSc distributed data structures.
+    int system_size = 0;
+    if (is_root_) {
+      system_size = static_cast<int>(state.y.size());
+    }
+    MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    std::cerr << "[RANK " << rank << "] setup_initial - system_size=" << system_size << std::endl;
+
+    if (system_size == 0) {
+      std::cerr << "[RANK " << rank << "] FATAL: system_size=0 in setup_initial!" << std::endl;
+      MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    // Ensure non-root ranks have a properly-sized state vector for the Integrator
+    if (!is_root_ && state.y.size() != system_size) {
+      state = State(system_size);
+    }
+
     // All ranks create Integrator - this triggers MPI collective operations
     // in analyze_pattern() that ALL ranks must participate in.
     Integrator integrator_steady(is_root_ ? this->model.get() : nullptr,
@@ -322,16 +342,36 @@ void Solver::setup_initial() {
 
 void Solver::setup_integrator() {
   // Set-up integrator
-  int system_size = state.y.size();
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+  // Broadcast system_size from root to all ranks. On non-root ranks, the
+  // state member may not be properly initialized.
+  int system_size = 0;
+  if (is_root_) {
+    system_size = static_cast<int>(state.y.size());
+  }
+  MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  std::cerr << "[RANK " << rank << "] setup_integrator - system_size=" << system_size << std::endl;
+
+  if (system_size == 0) {
+    std::cerr << "[RANK " << rank << "] FATAL: system_size=0 in setup_integrator!" << std::endl;
+    MPI_Abort(MPI_COMM_WORLD, 1);
+  }
+
+  // Ensure non-root ranks have a properly-sized state vector for the Integrator
+  if (!is_root_ && state.y.size() != system_size) {
+    state = State(system_size);
+  }
+
   DEBUG_MSG("Solver::setup_integrator - ENTER, rank=" << rank
             << ", is_root=" << (is_root_ ? "true" : "false")
             << ", state.y.size=" << system_size
             << ", time_step_size=" << simparams.sim_time_step_size);
 #else
+  int system_size = state.y.size();
   DEBUG_MSG("Solver::setup_integrator - begin");
 #endif
 
