@@ -810,6 +810,8 @@ void PetscGMRESLinearSolver::solve(
     Eigen::Matrix<double, Eigen::Dynamic, 1>& x) {
   int rank = 0;
   MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+  std::fprintf(stderr, "[RANK %d] PetscGMRESLinearSolver::solve - ENTER\n", rank);
+  std::fflush(stderr);
   DEBUG_MSG_RANK("PetscGMRESLinearSolver::solve - ENTER, rank=" << rank);
 
   PetscLogStagePush(stage_solve);
@@ -839,6 +841,9 @@ void PetscGMRESLinearSolver::solve(
       }
     }
     VecRestoreArrayRead(b_, &b_arr);
+    std::fprintf(stderr, "[RANK %d] solve - RHS check: local_size=%d, has_nonfinite=%s\n",
+                 rank, static_cast<int>(b_local_size), has_nonfinite ? "YES" : "no");
+    std::fflush(stderr);
     if (has_nonfinite) {
       std::ostringstream oss;
       oss << "[RANK " << rank << "] Non-finite value in RHS vector b_ at local index "
@@ -852,15 +857,21 @@ void PetscGMRESLinearSolver::solve(
                    << ", has_nonfinite=" << (has_nonfinite ? "YES" : "no"));
   }
 
+  std::fprintf(stderr, "[RANK %d] solve - zeroing solution vector\n", rank);
+  std::fflush(stderr);
   PetscErrorCode ierr = VecSet(x_, 0.0);
   if (ierr) {
     throw std::runtime_error("Failed to zero PETSc solution vector");
   }
 
+  std::fprintf(stderr, "[RANK %d] solve - about to call KSPSolve\n", rank);
+  std::fflush(stderr);
   DEBUG_MSG_RANK("solve - before KSPSolve, rank=" << rank);
   svzero_current_phase = SVZERO_PHASE_PETSC_KSP_SOLVE;
   ierr = KSPSolve(ksp_, b_, x_);
   svzero_current_phase = SVZERO_PHASE_NONE;
+  std::fprintf(stderr, "[RANK %d] solve - KSPSolve returned, ierr=%d\n", rank, static_cast<int>(ierr));
+  std::fflush(stderr);
   DEBUG_MSG_RANK("solve - after KSPSolve, rank=" << rank << ", ierr=" << ierr);
 
   if (ierr) {
@@ -1704,8 +1715,7 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
 }
 
 void SparseSystem::solve() {
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   // Mark that we are in the linear solve phase of a nonlinear step. This
   // catches floating-point exceptions that occur inside PETSc's KSPSolve or
   // factorization routines.
@@ -1715,19 +1725,39 @@ void SparseSystem::solve() {
   // Emit a per-rank debug message so that we can see how non-root ranks
   // participate in the PETSc linear solve when debugging MPI/PETSc issues.
   int rank = 0;
-#if defined(MPI_VERSION)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
-#endif
+  std::fprintf(stderr, "[RANK %d] SparseSystem::solve - ENTER, backend=%s\n",
+               rank, backend_ == LinearBackend::PETSc ? "PETSc" : "Eigen");
+  std::fflush(stderr);
   DEBUG_MSG("SparseSystem::solve - rank=" << rank
                                           << ", backend="
                                           << (backend_ == LinearBackend::PETSc
                                                   ? "PETSc"
                                                   : "Eigen"));
-#endif
+  try {
+    std::fprintf(stderr, "[RANK %d] SparseSystem::solve - calling factorize\n", rank);
+    std::fflush(stderr);
+    solver->factorize(jacobian);
+    std::fprintf(stderr, "[RANK %d] SparseSystem::solve - calling solve\n", rank);
+    std::fflush(stderr);
+    solver->solve(residual, dydot);
+    std::fprintf(stderr, "[RANK %d] SparseSystem::solve - solve complete\n", rank);
+    std::fflush(stderr);
+  } catch (const std::runtime_error& e) {
+    std::fprintf(stderr, "[RANK %d] SparseSystem::solve - EXCEPTION: %s\n", rank, e.what());
+    std::fflush(stderr);
+    svzero_current_phase = SVZERO_PHASE_NONE;
+    svzero_current_block_index = static_cast<std::size_t>(-1);
+    throw;
+  }
+  svzero_current_phase = SVZERO_PHASE_NONE;
+  svzero_current_block_index = static_cast<std::size_t>(-1);
+#else
+  // Non-PETSc path
   try {
     solver->factorize(jacobian);
     solver->solve(residual, dydot);
@@ -1744,17 +1774,8 @@ void SparseSystem::solve() {
     direct_solver.factorize(jacobian);
     direct_solver.solve(residual, dydot);
 #else
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-    svzero_current_phase = SVZERO_PHASE_NONE;
-    svzero_current_block_index = static_cast<std::size_t>(-1);
-#endif
     throw;
 #endif
   }
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-  svzero_current_phase = SVZERO_PHASE_NONE;
-  svzero_current_block_index = static_cast<std::size_t>(-1);
-#endif
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES && MPI_VERSION
 }

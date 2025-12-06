@@ -133,19 +133,19 @@ void Integrator::update_params(double time_step_size) {
 State Integrator::step(const State& old_state, double time) {
   // Predictor: Constant y, consistent ydot
   State new_state = State::Zero(size);
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   const bool is_root = integrator_is_root_rank();
   // Track the current physical time for debug reporting on all ranks.
   svzero_current_time = time;
   int rank = 0;
-#if defined(MPI_VERSION)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
-#endif
+  std::fprintf(stderr, "[RANK %d] Integrator::step - ENTER, time=%g, size=%d\n",
+               rank, time, size);
+  std::fflush(stderr);
   DEBUG_MSG("Integrator::step - rank=" << rank
                                        << ", is_root=" << (is_root ? "true" : "false")
                                        << ", time=" << time);
@@ -197,6 +197,10 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate residual (collective across all ranks when using PETSc).
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling update_residual\n", rank, i);
+    std::fflush(stderr);
+#endif
     DEBUG_MSG("Integrator::step - calling SparseSystem::update_residual");
     system.update_residual(y_af, ydot_am);
 
@@ -206,13 +210,18 @@ State Integrator::step(const State& old_state, double time) {
       max_residual = system.residual.cwiseAbs().maxCoeff();
       DEBUG_CHECK_VALUE(max_residual, "max_residual before Bcast");
     }
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    std::fprintf(stderr, "[RANK %d] step - iter=%zu, before MPI_Bcast(max_residual)=%g\n",
+                 rank, i, max_residual);
+    std::fflush(stderr);
     DEBUG_MSG_RANK("Integrator::step - before MPI_Bcast(max_residual), iter=" << i
                    << ", rank=" << rank << ", max_residual=" << max_residual);
     svzero_current_phase = SVZERO_PHASE_MPI_BCAST_RESIDUAL;
     MPI_Bcast(&max_residual, 1, MPI_DOUBLE, 0, PETSC_COMM_WORLD);
     svzero_current_phase = SVZERO_PHASE_NONE;
+    std::fprintf(stderr, "[RANK %d] step - iter=%zu, after MPI_Bcast(max_residual)=%g\n",
+                 rank, i, max_residual);
+    std::fflush(stderr);
     DEBUG_MSG_RANK("Integrator::step - after MPI_Bcast(max_residual), iter=" << i
                    << ", rank=" << rank << ", max_residual=" << max_residual);
     DEBUG_CHECK_VALUE(max_residual, "max_residual after Bcast");
@@ -231,10 +240,18 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate Jacobian
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling update_jacobian\n", rank, i);
+    std::fflush(stderr);
+#endif
     DEBUG_MSG("Integrator::step - calling SparseSystem::update_jacobian");
     system.update_jacobian(alpha_m, y_coeff_jacobian);
 
     // Solve system for increment in ydot
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling solve\n", rank, i);
+    std::fflush(stderr);
+#endif
     DEBUG_MSG("Integrator::step - calling SparseSystem::solve");
     system.solve();
 
