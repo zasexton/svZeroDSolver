@@ -221,10 +221,19 @@ Solver::Solver(const SimulationParameters& simparams_in,
 }
 
 void Solver::setup_initial() {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+  int rank = 0;
+  int mpi_init = 0;
+  MPI_Initialized(&mpi_init);
+  if (mpi_init) {
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  }
+  // Use stderr for immediate output before potential crash
+  std::cerr << "[RANK " << rank << "] Solver::setup_initial - ENTER" << std::endl;
+  std::cerr.flush();
+#endif
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
-  int rank = 0;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   DEBUG_MSG("Solver::setup_initial - ENTER, rank=" << rank
             << ", is_root=" << (is_root_ ? "true" : "false")
             << ", initial_state.y.size=" << initial_state.y.size()
@@ -245,6 +254,10 @@ void Solver::setup_initial() {
   // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
   // creation and step() calls because they contain MPI collective operations.
   if (simparams.sim_steady_initial) {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+    std::cerr << "[RANK " << rank << "] setup_initial - steady_initial=true, creating Integrator" << std::endl;
+    std::cerr.flush();
+#endif
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
     // For PETSc GMRES, all ranks must participate in collective operations.

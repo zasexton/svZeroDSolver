@@ -45,6 +45,20 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
 Integrator::Integrator(Model* model, int system_size, double time_step_size,
                        double rho, double atol, int max_iter)
     : system(SparseSystem(system_size)), model(model) {
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  {
+    int rank = 0;
+    int mpi_init = 0;
+    MPI_Initialized(&mpi_init);
+    if (mpi_init) {
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+    std::cerr << "[RANK " << rank << "] Integrator::Integrator - ENTER, system_size="
+              << system_size << ", model=" << (model ? "valid" : "null") << std::endl;
+    std::cerr.flush();
+  }
+#endif
   DEBUG_MSG("Integrator::Integrator - begin, system_size=" << system_size);
   const double denom_rho = 1.0 + rho;
   if (!std::isfinite(denom_rho) || std::fabs(denom_rho) <= 1e-12) {

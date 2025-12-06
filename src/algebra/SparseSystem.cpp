@@ -123,6 +123,19 @@ void ensure_petsc_initialized() {
   static bool registered_finalize = false;
   static bool log_stages_registered = false;
 
+  // Early stderr output to trace where crashes occur
+  {
+    int rank = -1;
+    int mpi_init = 0;
+    MPI_Initialized(&mpi_init);
+    if (mpi_init) {
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+    std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - ENTER, already_initialized=%s\n",
+                 rank, initialized ? "true" : "false");
+    std::fflush(stderr);
+  }
+
   auto finalize_petsc = []() {
     // Guard against double-finalize.
     static bool finalized_once = false;
@@ -133,6 +146,18 @@ void ensure_petsc_initialized() {
   };
 
   if (!initialized) {
+    // Trace before any PETSc operations
+    {
+      int rank = -1;
+      int mpi_init = 0;
+      MPI_Initialized(&mpi_init);
+      if (mpi_init) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+      }
+      std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - about to call PetscInitialize\n", rank);
+      std::fflush(stderr);
+    }
+
     svzero_current_phase = SVZERO_PHASE_PETSC_INIT;
 
     // Disable system-level floating-point exceptions BEFORE PetscInitialize.
@@ -154,6 +179,14 @@ void ensure_petsc_initialized() {
       throw std::runtime_error("Failed to initialize PETSc");
     }
     initialized = true;
+
+    // Trace after PetscInitialize succeeds
+    {
+      int rank = 0;
+      MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+      std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - PetscInitialize complete\n", rank);
+      std::fflush(stderr);
+    }
 
     // Get rank info for debug output
     int rank = 0, comm_size = 0;
@@ -237,6 +270,8 @@ void ensure_petsc_initialized() {
     }
 
     svzero_current_phase = SVZERO_PHASE_NONE;
+    std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - complete\n", rank);
+    std::fflush(stderr);
     DEBUG_MSG_RANK("ensure_petsc_initialized - complete, rank=" << rank);
   }
 }
@@ -459,6 +494,8 @@ void PetscGMRESLinearSolver::analyze_pattern(
   int rank = 0, comm_size_dbg = 0;
   MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   MPI_Comm_size(PETSC_COMM_WORLD, &comm_size_dbg);
+  std::fprintf(stderr, "[RANK %d] PetscGMRESLinearSolver::analyze_pattern - ENTER\n", rank);
+  std::fflush(stderr);
   DEBUG_MSG_RANK("PetscGMRESLinearSolver::analyze_pattern - ENTER, rank=" << rank
                  << "/" << comm_size_dbg << ", is_root=" << (root ? "yes" : "no"));
 
@@ -649,11 +686,15 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to create PETSc RHS vector");
   }
 
+  std::fprintf(stderr, "[RANK %d] analyze_pattern - creating KSP\n", comm_rank);
+  std::fflush(stderr);
   ierr = KSPCreate(PETSC_COMM_WORLD, &ksp_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc KSP");
   }
 
+  std::fprintf(stderr, "[RANK %d] analyze_pattern - setting KSP type to GMRES\n", comm_rank);
+  std::fflush(stderr);
   ierr = KSPSetType(ksp_, KSPGMRES);
   if (ierr) {
     throw std::runtime_error("Failed to set KSP type to GMRES");
@@ -664,6 +705,9 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (ierr) {
     throw std::runtime_error("Failed to get PETSc PC");
   }
+
+  std::fprintf(stderr, "[RANK %d] analyze_pattern - setting up preconditioner\n", comm_rank);
+  std::fflush(stderr);
 
 #ifdef SVZERODSOLVER_PETSC_PRECONDITIONER
   const char* pc_opt = SVZERODSOLVER_PETSC_PRECONDITIONER;
@@ -702,16 +746,24 @@ void PetscGMRESLinearSolver::analyze_pattern(
   // Create a sequential vector and a scatter to gather the distributed
   // solution onto the root rank only. VecScatterCreateToZero will allocate
   // x_seq_ only on rank 0.
+  std::fprintf(stderr, "[RANK %d] analyze_pattern - creating VecScatter to root\n", comm_rank);
+  std::fflush(stderr);
   ierr = VecScatterCreateToZero(x_, &scatter_to_root_, &x_seq_);
   if (ierr) {
     throw std::runtime_error("Failed to create PETSc VecScatter to root");
   }
+  std::fprintf(stderr, "[RANK %d] analyze_pattern - complete\n", comm_rank);
+  std::fflush(stderr);
   DEBUG_MSG("PetscGMRESLinearSolver::analyze_pattern - VecScatter to root created");
   PetscLogStagePop();
 }
 
 void PetscGMRESLinearSolver::factorize(
     const Eigen::SparseMatrix<double>& A) {
+  int comm_rank = 0;
+  MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+  std::fprintf(stderr, "[RANK %d] PetscGMRESLinearSolver::factorize - ENTER\n", comm_rank);
+  std::fflush(stderr);
   DEBUG_MSG("PetscGMRESLinearSolver::factorize - begin");
   PetscLogStagePush(stage_factorize);
   if (A_ == nullptr || ksp_ == nullptr) {
@@ -723,6 +775,8 @@ void PetscGMRESLinearSolver::factorize(
   // options. The Eigen matrix argument is ignored for the PETSc backend.
   (void)A;
 
+  std::fprintf(stderr, "[RANK %d] factorize - KSPSetOperators\n", comm_rank);
+  std::fflush(stderr);
   PetscErrorCode ierr = KSPSetOperators(ksp_, A_, A_);
   if (ierr) {
     throw std::runtime_error("Failed to set PETSc KSP operators");
@@ -736,10 +790,17 @@ void PetscGMRESLinearSolver::factorize(
   }
 
   // Allow command-line options to further tune the solver if desired.
+  // NOTE: This is where command-line options like -pc_type hypre are applied.
+  // If hypre BoomerAMG is requested, this can trigger the AMG setup which
+  // may crash on large distributed systems if hypre isn't properly configured.
+  std::fprintf(stderr, "[RANK %d] factorize - KSPSetFromOptions (applies -pc_type, etc.)\n", comm_rank);
+  std::fflush(stderr);
   ierr = KSPSetFromOptions(ksp_);
   if (ierr) {
     throw std::runtime_error("Failed to apply PETSc KSP options");
   }
+  std::fprintf(stderr, "[RANK %d] factorize - complete\n", comm_rank);
+  std::fflush(stderr);
   DEBUG_MSG("PetscGMRESLinearSolver::factorize - end");
   PetscLogStagePop();
 }
@@ -1015,6 +1076,16 @@ SparseSystem::SparseSystem(int n)
 {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  {
+    int rank = 0;
+    int mpi_init = 0;
+    MPI_Initialized(&mpi_init);
+    if (mpi_init) {
+      MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    }
+    std::cerr << "[RANK " << rank << "] SparseSystem::SparseSystem(n=" << n << ") - ENTER" << std::endl;
+    std::cerr.flush();
+  }
   const bool is_root = is_root_rank();
 #else
   const bool is_root = true;
