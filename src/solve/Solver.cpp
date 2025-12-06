@@ -255,13 +255,10 @@ void Solver::setup_initial() {
   // creation and step() calls because they contain MPI collective operations.
   if (simparams.sim_steady_initial) {
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
-    std::cerr << "[RANK " << rank << "] setup_initial - steady_initial=true, creating Integrator" << std::endl;
-    std::cerr.flush();
-#endif
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
     // For PETSc GMRES, all ranks must participate in collective operations.
     // Root rank does actual computation; non-root ranks participate in MPI collectives.
+    std::cerr << "[RANK " << rank << "] setup_initial - steady_initial=true, creating Integrator" << std::endl;
+    std::cerr.flush();
     DEBUG_MSG("Calculate steady initial condition (PETSc parallel mode)");
 
     // Broadcast time_step_size_steady from root to all ranks
@@ -273,6 +270,7 @@ void Solver::setup_initial() {
     // NOTE: Use MPI_COMM_WORLD here because PETSc hasn't been initialized yet.
     // PETSc initialization happens when the Integrator is created below.
     MPI_Bcast(&time_step_size_steady, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    std::cerr << "[RANK " << rank << "] setup_initial - time_step_size_steady=" << time_step_size_steady << std::endl;
 
     // Broadcast system_size from root to all ranks. On non-root ranks, the
     // state member may not be properly initialized even though initial_state
@@ -282,8 +280,9 @@ void Solver::setup_initial() {
     if (is_root_) {
       system_size = static_cast<int>(state.y.size());
     }
+    std::cerr << "[RANK " << rank << "] setup_initial - before Bcast system_size, local=" << system_size << std::endl;
     MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    std::cerr << "[RANK " << rank << "] setup_initial - system_size=" << system_size << std::endl;
+    std::cerr << "[RANK " << rank << "] setup_initial - after Bcast system_size=" << system_size << std::endl;
 
     if (system_size == 0) {
       std::cerr << "[RANK " << rank << "] FATAL: system_size=0 in setup_initial!" << std::endl;
@@ -291,10 +290,12 @@ void Solver::setup_initial() {
     }
 
     // Ensure non-root ranks have a properly-sized state vector for the Integrator
-    if (!is_root_ && state.y.size() != system_size) {
+    if (!is_root_ && static_cast<int>(state.y.size()) != system_size) {
+      std::cerr << "[RANK " << rank << "] setup_initial - resizing state from " << state.y.size() << " to " << system_size << std::endl;
       state = State(system_size);
     }
 
+    std::cerr << "[RANK " << rank << "] setup_initial - creating Integrator with system_size=" << system_size << std::endl;
     // All ranks create Integrator - this triggers MPI collective operations
     // in analyze_pattern() that ALL ranks must participate in.
     Integrator integrator_steady(is_root_ ? this->model.get() : nullptr,
@@ -342,10 +343,14 @@ void Solver::setup_initial() {
 
 void Solver::setup_integrator() {
   // Set-up integrator
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   int rank = 0;
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  int mpi_init = 0;
+  MPI_Initialized(&mpi_init);
+  if (mpi_init) {
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  }
+  std::cerr << "[RANK " << rank << "] setup_integrator - ENTER" << std::endl;
 
   // Broadcast system_size from root to all ranks. On non-root ranks, the
   // state member may not be properly initialized.
@@ -353,8 +358,9 @@ void Solver::setup_integrator() {
   if (is_root_) {
     system_size = static_cast<int>(state.y.size());
   }
+  std::cerr << "[RANK " << rank << "] setup_integrator - before Bcast system_size, local=" << system_size << std::endl;
   MPI_Bcast(&system_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  std::cerr << "[RANK " << rank << "] setup_integrator - system_size=" << system_size << std::endl;
+  std::cerr << "[RANK " << rank << "] setup_integrator - after Bcast system_size=" << system_size << std::endl;
 
   if (system_size == 0) {
     std::cerr << "[RANK " << rank << "] FATAL: system_size=0 in setup_integrator!" << std::endl;
@@ -362,7 +368,8 @@ void Solver::setup_integrator() {
   }
 
   // Ensure non-root ranks have a properly-sized state vector for the Integrator
-  if (!is_root_ && state.y.size() != system_size) {
+  if (!is_root_ && static_cast<int>(state.y.size()) != system_size) {
+    std::cerr << "[RANK " << rank << "] setup_integrator - resizing state from " << state.y.size() << " to " << system_size << std::endl;
     state = State(system_size);
   }
 
@@ -370,18 +377,15 @@ void Solver::setup_integrator() {
             << ", is_root=" << (is_root_ ? "true" : "false")
             << ", state.y.size=" << system_size
             << ", time_step_size=" << simparams.sim_time_step_size);
-#else
-  int system_size = state.y.size();
-  DEBUG_MSG("Solver::setup_integrator - begin");
-#endif
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  std::cerr << "[RANK " << rank << "] setup_integrator - creating Integrator with system_size=" << system_size << std::endl;
   integrator = Integrator(is_root_ ? this->model.get() : nullptr,
                           system_size, simparams.sim_time_step_size,
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
                           simparams.sim_nliter);
 #else
+  int system_size = state.y.size();
+  DEBUG_MSG("Solver::setup_integrator - begin");
   integrator = Integrator(this->model.get(), simparams.sim_time_step_size,
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
                           simparams.sim_nliter);
