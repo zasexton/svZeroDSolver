@@ -253,6 +253,10 @@ void ensure_petsc_initialized() {
     // Always generate a PETSc log summary in debug builds so that timings for
     // the registered log stages and operations are available.
     PetscOptionsSetValue(nullptr, "-log_view", nullptr);
+    // Enable PETSc's malloc debugging in Debug builds so that heap
+    // corruption or misuse of PETSc objects is detected as early as
+    // possible (at some performance cost).
+    PetscOptionsSetValue(nullptr, "-malloc_debug", nullptr);
 #endif
 
     if (!log_stages_registered) {
