@@ -6,11 +6,13 @@
 #include "csv_writer.h"
 
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
-#if __has_include(<mpi.h>)
-#include <mpi.h>
-#endif
 #if __has_include(<petscsys.h>)
 #include <petscsys.h>
+#endif
+// If PETSc was built without MPI support (mpiuni), rely on PETSc's own
+// mpiuni headers and avoid including an external mpi.h implementation.
+#if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
+#include <mpi.h>
 #endif
 #endif
 

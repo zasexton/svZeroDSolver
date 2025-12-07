@@ -11,7 +11,9 @@
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
-#if __has_include(<mpi.h>)
+// If PETSc was built without real MPI (mpiuni), do not include an external
+// mpi.h implementation (e.g., OpenMPI) to avoid conflicting MPI type/macros.
+#if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
 #include "SvzeroDebug.h"

@@ -13,7 +13,10 @@
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 #include <petscsys.h>
-#if __has_include(<mpi.h>)
+// When PETSc is configured with mpiuni (no real MPI), its own mpi.h will be
+// pulled in via petsc headers. Do not include an external mpi.h (e.g. OpenMPI)
+// to avoid conflicting MPI definitions.
+#if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
 #endif
 #endif
