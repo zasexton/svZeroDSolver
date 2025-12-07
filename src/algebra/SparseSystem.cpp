@@ -675,6 +675,19 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to create PETSc matrix");
   }
 
+#ifndef NDEBUG
+  // In debug builds, request that PETSc treat any attempt to insert a new
+  // structural nonzero (i.e., a matrix entry not covered by the preallocated
+  // sparsity pattern) as an error instead of silently reallocating. This
+  // helps catch bugs where MatSetValue is called with out-of-range indices or
+  // an inconsistent sparsity pattern.
+  ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to enable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
+  }
+#endif
+
   // Create matching distributed solution and RHS vectors.
   ierr = VecCreateMPI(PETSC_COMM_WORLD, n_local, n_, &x_);
   if (ierr) {
@@ -935,7 +948,12 @@ void PetscGMRESLinearSolver::solve(
 
   // Scatter the distributed PETSc solution onto a sequential vector on the
   // root rank only, then copy into the Eigen vector x on that rank.
-  if (scatter_to_root_ == nullptr || x_seq_ == nullptr) {
+  //
+  // NOTE: VecScatterCreateToZero only allocates x_seq_ on the root rank.
+  // On non-root ranks x_seq_ may legitimately be nullptr, but the scatter
+  // operations are still collective and must be called on all ranks. We
+  // therefore only require scatter_to_root_ to be non-null here.
+  if (scatter_to_root_ == nullptr) {
     throw std::runtime_error("PETSc GMRES scatter to root not initialized");
   }
 
