@@ -260,9 +260,15 @@ if(SVZERODSOLVER_HAVE_PETSC)
   target_link_libraries(svzerodcalibrator PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
   target_link_libraries(pysvzerod         PRIVATE ${SVZERODSOLVER_PETSC_LIBRARIES})
   if(SVZERODSOLVER_PETSC_INCLUDE_DIRS)
-    target_include_directories(svzerodsolver     PRIVATE ${SVZERODSOLVER_PETSC_INCLUDE_DIRS})
-    target_include_directories(svzerodcalibrator PRIVATE ${SVZERODSOLVER_PETSC_INCLUDE_DIRS})
-    target_include_directories(pysvzerod         PRIVATE ${SVZERODSOLVER_PETSC_INCLUDE_DIRS})
+    foreach(_petsc_tgt svzerodsolver svzerodcalibrator pysvzerod
+                       svzero_solve_library svzero_interface
+                       svzero_algebra_library svzero_model_library
+                       svzero_optimize_library)
+      if(TARGET ${_petsc_tgt})
+        target_include_directories(${_petsc_tgt} PRIVATE
+          ${SVZERODSOLVER_PETSC_INCLUDE_DIRS})
+      endif()
+    endforeach()
   endif()
 endif()
 if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
