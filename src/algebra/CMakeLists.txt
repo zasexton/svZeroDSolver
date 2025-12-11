@@ -223,6 +223,7 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
     endif()
   endforeach()
 
+  set(_svzero_petsc_have_mpiuni "")
   if(_svzero_petscconf_header)
     file(STRINGS "${_svzero_petscconf_header}" _svzero_petsc_have_mpiuni
          REGEX "^#define PETSC_HAVE_MPIUNI 1")
@@ -231,23 +232,39 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
   # Default: assume PETSc without MPI unless proven otherwise.
   set(SVZERODSOLVER_PETSC_WITH_MPI FALSE PARENT_SCOPE)
 
-  if(_svzero_petscconf_header AND _svzero_petsc_have_mpiuni)
-    # mpiuni provides its own mpi.h under PETSc include.
-    target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS}/mpiuni)
-  elseif(_svzero_petscconf_header AND NOT _svzero_petsc_have_mpiuni)
-    # PETSc was built with a real MPI. Use CMake's FindMPI to properly locate
-    # both headers and libraries, handling non-standard installation paths.
-    find_package(MPI REQUIRED COMPONENTS CXX)
-    if(NOT MPI_CXX_FOUND)
-      message(FATAL_ERROR
-        "PETSc was built with MPI support, but MPI was not found. "
-        "Install MPI development headers (e.g., openmpi-dev or mpich) or "
-        "set MPI_HOME to your MPI installation.")
-    endif()
+  if(_svzero_petscconf_header)
+    if(_svzero_petsc_have_mpiuni)
+      # mpiuni provides its own mpi.h under PETSc include.
+      target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS}/mpiuni)
+    else()
+      # PETSc was built with a real MPI. Use CMake's FindMPI to properly locate
+      # both headers and libraries, handling non-standard installation paths.
+      find_package(MPI REQUIRED COMPONENTS CXX)
+      if(NOT MPI_CXX_FOUND)
+        message(FATAL_ERROR
+          "PETSc was built with MPI support, but MPI was not found. "
+          "Install MPI development headers (e.g., openmpi-dev or mpich) or "
+          "set MPI_HOME to your MPI installation.")
+      endif()
 
-    target_include_directories(${lib} PUBLIC ${MPI_CXX_INCLUDE_DIRS})
-    target_link_libraries(${lib} PUBLIC MPI::MPI_CXX)
-    set(SVZERODSOLVER_PETSC_WITH_MPI TRUE PARENT_SCOPE)
+      target_include_directories(${lib} PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+      target_link_libraries(${lib} PUBLIC MPI::MPI_CXX)
+      set(SVZERODSOLVER_PETSC_WITH_MPI TRUE PARENT_SCOPE)
+    endif()
+  else()
+    # petscconf.h may not exist yet when PETSc is built via ExternalProject.
+    # In that case, infer MPI usage from the PETSc configure options.
+    set(_svzero_petsc_opts "${SVZERODSOLVER_PETSC_CONFIGURE_OPTIONS}")
+    if(_svzero_petsc_opts MATCHES "--with-mpi=1"
+       OR _svzero_petsc_opts MATCHES "--download-mpich"
+       OR _svzero_petsc_opts MATCHES "--download-openmpi")
+      find_package(MPI REQUIRED COMPONENTS CXX)
+      target_include_directories(${lib} PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+      target_link_libraries(${lib} PUBLIC MPI::MPI_CXX)
+      set(SVZERODSOLVER_PETSC_WITH_MPI TRUE PARENT_SCOPE)
+    else()
+      target_include_directories(${lib} PUBLIC ${PETSC_INCLUDE_DIRS}/mpiuni)
+    endif()
   endif()
 
   # Propagate PETSc availability and link information to parent scope so that
