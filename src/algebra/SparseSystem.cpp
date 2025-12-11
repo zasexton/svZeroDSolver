@@ -764,8 +764,6 @@ void PetscGMRESLinearSolver::analyze_pattern(
 #ifdef SVZERODSOLVER_PETSC_PRECONDITIONER
   const char* pc_opt = SVZERODSOLVER_PETSC_PRECONDITIONER;
   use_bjacobi_with_ilu_ = false;
-  int comm_size = 1;
-  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
   if (std::strcmp(pc_opt, "none") == 0) {
     ierr = PCSetType(pc, PCNONE);
   } else if (std::strcmp(pc_opt, "jacobi") == 0) {
