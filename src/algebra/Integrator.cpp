@@ -8,18 +8,24 @@
 
 #include "debug.h"
 
+// When using PETSc with mpiuni (no real MPI), we must avoid including any
+// external MPI headers. First include petscconf.h to get PETSC_HAVE_MPIUNI,
+// then conditionally include full PETSc and MPI headers.
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<petscconf.h>)
+#include <petscconf.h>
+#endif
 #include <petscsys.h>
-// If PETSc was built without real MPI (mpiuni), do not include an external
-// mpi.h implementation (e.g., OpenMPI) to avoid conflicting MPI type/macros.
+// Only include real MPI if PETSc was built with real MPI (not mpiuni stubs)
 #if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
+#define SVZERO_HAVE_REAL_MPI 1
 #endif
 #include "SvzeroDebug.h"
 namespace {
 inline bool integrator_is_root_rank() {
-#ifdef MPI_VERSION
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (!mpi_initialized) {
@@ -47,8 +53,7 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
 Integrator::Integrator(Model* model, int system_size, double time_step_size,
                        double rho, double atol, int max_iter)
     : system(SparseSystem(system_size)), model(model) {
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if defined(SVZERO_HAVE_REAL_MPI)
   {
     int rank = 0;
     int mpi_init = 0;
@@ -135,7 +140,7 @@ void Integrator::update_params(double time_step_size) {
 State Integrator::step(const State& old_state, double time) {
   // Predictor: Constant y, consistent ydot
   State new_state = State::Zero(size);
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   const bool is_root = integrator_is_root_rank();
   // Track the current physical time for debug reporting on all ranks.
   svzero_current_time = time;
@@ -199,7 +204,7 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate residual (collective across all ranks when using PETSc).
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling update_residual\n", rank, i);
     std::fflush(stderr);
 #endif
@@ -212,7 +217,7 @@ State Integrator::step(const State& old_state, double time) {
       max_residual = system.residual.cwiseAbs().maxCoeff();
       DEBUG_CHECK_VALUE(max_residual, "max_residual before Bcast");
     }
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     std::fprintf(stderr, "[RANK %d] step - iter=%zu, before MPI_Bcast(max_residual)=%g\n",
                  rank, i, max_residual);
     std::fflush(stderr);
@@ -242,7 +247,7 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate Jacobian
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling update_jacobian\n", rank, i);
     std::fflush(stderr);
 #endif
@@ -250,7 +255,7 @@ State Integrator::step(const State& old_state, double time) {
     system.update_jacobian(alpha_m, y_coeff_jacobian);
 
     // Solve system for increment in ydot
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     std::fprintf(stderr, "[RANK %d] step - iter=%zu, calling solve\n", rank, i);
     std::fflush(stderr);
 #endif
@@ -269,8 +274,7 @@ State Integrator::step(const State& old_state, double time) {
     }
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Broadcast the updated state from the root rank so that all ranks see a
   // consistent state, while only the root performed the updates.
 

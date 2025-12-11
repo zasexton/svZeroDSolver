@@ -7,8 +7,19 @@
 #include <fstream>
 
 #include "Solver.h"
-#if __has_include(<mpi.h>)
+// When using PETSc with mpiuni (no real MPI), we must avoid including any
+// external MPI headers. First include petscconf.h to get PETSC_HAVE_MPIUNI,
+// then conditionally include full PETSc and MPI headers.
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<petscconf.h>)
+#include <petscconf.h>
+#endif
+#include <petscsys.h>
+// Only include real MPI if PETSc was built with real MPI (not mpiuni stubs)
+#if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
+#define SVZERO_HAVE_REAL_MPI 1
+#endif
 #endif
 #include "StreamingConfigLoader.h"
 
@@ -85,7 +96,7 @@ int main(int argc, char* argv[]) {
 
   DEBUG_MSG("Starting svZeroDSolver");
 
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Ensure MPI is initialized so that PETSc can use it and ranks can
   // coordinate before PETSc is first touched.
   int mpi_initialized = 0;
@@ -136,7 +147,7 @@ int main(int argc, char* argv[]) {
   }
 
   bool is_root = true;
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Determine if this rank is the root rank (rank 0 in MPI_COMM_WORLD).
   int world_rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
@@ -180,7 +191,7 @@ int main(int argc, char* argv[]) {
   auto detect_mpi_rank = []() -> std::pair<bool, int> {
     int rank = 0;
     bool active = false;
-#if defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     int mpi_init = 0;
     MPI_Initialized(&mpi_init);
     if (mpi_init) {

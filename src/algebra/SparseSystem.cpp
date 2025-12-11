@@ -3,6 +3,20 @@
 
 #include "SparseSystem.h"
 
+// When using PETSc with mpiuni (no real MPI), we must avoid using any real MPI
+// calls. Include petscconf.h early to get PETSC_HAVE_MPIUNI before any code
+// that might check MPI_VERSION.
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<petscconf.h>)
+#include <petscconf.h>
+#endif
+// Define SVZERO_HAVE_REAL_MPI only if PETSc was built with real MPI
+#if !defined(PETSC_HAVE_MPIUNI)
+#define SVZERO_HAVE_REAL_MPI 1
+#endif
+#endif
+
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
@@ -70,11 +84,13 @@ namespace {
 // available and only log output can be inspected.
 void svzero_sigfpe_handler(int sig) {
   int rank = -1;
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
+#endif
 
   // Report the current phase and last block index being processed.
   // Using fprintf/backtrace here is not strictly async-signal-safe, but is
@@ -107,7 +123,9 @@ void svzero_sigfpe_handler(int sig) {
 
 // Return true on the rank that owns the global Eigen system (rank 0 in
 // PETSC_COMM_WORLD). If MPI is not yet initialized, treat the caller as root.
+// When using mpiuni (no real MPI), always return true since there's only one rank.
 bool is_root_rank() {
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   int rank = 0;
@@ -115,6 +133,9 @@ bool is_root_rank() {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
   return rank == 0;
+#else
+  return true;  // mpiuni mode: always root
+#endif
 }
 
 // Ensure PETSc is initialized once per process.
@@ -126,11 +147,13 @@ void ensure_petsc_initialized() {
   // Early stderr output to trace where crashes occur
   {
     int rank = -1;
+#if defined(SVZERO_HAVE_REAL_MPI)
     int mpi_init = 0;
     MPI_Initialized(&mpi_init);
     if (mpi_init) {
       MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     }
+#endif
     std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - ENTER, already_initialized=%s\n",
                  rank, initialized ? "true" : "false");
     std::fflush(stderr);
@@ -149,11 +172,13 @@ void ensure_petsc_initialized() {
     // Trace before any PETSc operations
     {
       int rank = -1;
+#if defined(SVZERO_HAVE_REAL_MPI)
       int mpi_init = 0;
       MPI_Initialized(&mpi_init);
       if (mpi_init) {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
       }
+#endif
       std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - about to call PetscInitialize\n", rank);
       std::fflush(stderr);
     }
@@ -183,15 +208,19 @@ void ensure_petsc_initialized() {
     // Trace after PetscInitialize succeeds
     {
       int rank = 0;
+#if defined(SVZERO_HAVE_REAL_MPI)
       MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+#endif
       std::fprintf(stderr, "[RANK %d] ensure_petsc_initialized - PetscInitialize complete\n", rank);
       std::fflush(stderr);
     }
 
     // Get rank info for debug output
-    int rank = 0, comm_size = 0;
+    int rank = 0, comm_size = 1;
+#if defined(SVZERO_HAVE_REAL_MPI)
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
     MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+#endif
     DEBUG_MSG_RANK("ensure_petsc_initialized - PetscInitialize complete, rank="
                    << rank << "/" << comm_size);
 
@@ -1374,7 +1403,7 @@ void SparseSystem::update_residual(
   // Emit a per-rank debug message so that we can see how non-root ranks
   // participate in PETSc residual assembly when debugging MPI/PETSc issues.
   int rank = 0;
-#if defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
@@ -1586,7 +1615,7 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
   // Emit a per-rank debug message so that we can see how non-root ranks
   // participate in PETSc Jacobian assembly when debugging MPI/PETSc issues.
   int rank = 0;
-#if defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
@@ -1737,7 +1766,7 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
 }
 
 void SparseSystem::solve() {
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   // Mark that we are in the linear solve phase of a nonlinear step. This
   // catches floating-point exceptions that occur inside PETSc's KSPSolve or
   // factorization routines.
@@ -1747,11 +1776,13 @@ void SparseSystem::solve() {
   // Emit a per-rank debug message so that we can see how non-root ranks
   // participate in the PETSc linear solve when debugging MPI/PETSc issues.
   int rank = 0;
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (mpi_initialized) {
     MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
   }
+#endif
   std::fprintf(stderr, "[RANK %d] SparseSystem::solve - ENTER, backend=%s\n",
                rank, backend_ == LinearBackend::PETSc ? "PETSc" : "Eigen");
   std::fflush(stderr);
@@ -1799,5 +1830,5 @@ void SparseSystem::solve() {
     throw;
 #endif
   }
-#endif  // SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES && MPI_VERSION
+#endif  // SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 }

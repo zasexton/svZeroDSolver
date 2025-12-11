@@ -7,16 +7,23 @@
 
 #include "SimulationParameters.h"
 
+// When using PETSc with mpiuni (no real MPI), we must avoid including any
+// external MPI headers. First include petscconf.h to get PETSC_HAVE_MPIUNI,
+// then conditionally include full PETSc and MPI headers.
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<petscconf.h>)
+#include <petscconf.h>
+#endif
 #include <petscsys.h>
-// Avoid including an external MPI implementation when PETSc is using mpiuni.
+// Only include real MPI if PETSc was built with real MPI (not mpiuni stubs)
 #if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
+#define SVZERO_HAVE_REAL_MPI 1
 #endif
 namespace {
 inline bool interface_is_root_rank() {
-#ifdef MPI_VERSION
+#if defined(SVZERO_HAVE_REAL_MPI)
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
   if (!mpi_initialized) {
@@ -166,8 +173,7 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     variable_names = model->dofhandler.variables;
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Broadcast simulation parameters and system size to all ranks so that they
   // do not need to parse the JSON or build the Model.
   // NOTE: Use MPI_COMM_WORLD here because PETSc hasn't been initialized yet.
@@ -213,8 +219,7 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
   // creation and step() calls because they contain MPI collective operations.
   if (simparams.sim_steady_initial) {
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     // For PETSc GMRES, all ranks must participate in collective operations.
     DEBUG_MSG("[initialize] ----- Calculating steady initial condition (PETSc parallel mode) ----- ");
 
@@ -263,8 +268,7 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
 #endif
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Broadcast initial state to all ranks (for non-steady or after steady computation).
   // NOTE: After the steady initial computation above (if it ran), PETSc is now
   // initialized and PETSC_COMM_WORLD is valid. If steady_initial was false,

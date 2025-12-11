@@ -5,21 +5,26 @@
 
 #include "csv_writer.h"
 
+// When using PETSc with mpiuni (no real MPI), we must avoid including any
+// external MPI headers. First include petscconf.h to get PETSC_HAVE_MPIUNI,
+// then conditionally include full PETSc and MPI headers.
 #if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if __has_include(<petscconf.h>)
+#include <petscconf.h>
+#endif
 #if __has_include(<petscsys.h>)
 #include <petscsys.h>
 #endif
-// If PETSc was built without MPI support (mpiuni), rely on PETSc's own
-// mpiuni headers and avoid including an external mpi.h implementation.
+// Only include real MPI if PETSc was built with real MPI (not mpiuni stubs)
 #if !defined(PETSC_HAVE_MPIUNI) && __has_include(<mpi.h>)
 #include <mpi.h>
+#define SVZERO_HAVE_REAL_MPI 1
 #endif
 #endif
 
 Solver::Solver(const nlohmann::json& config)
     : Solver(config, []() {
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
         // Determine if this rank is root (rank 0) for MPI runs.
         // Use MPI_COMM_WORLD because PETSc isn't initialized yet.
         int mpi_initialized = 0;
@@ -35,8 +40,7 @@ Solver::Solver(const nlohmann::json& config)
 
 Solver::Solver(const nlohmann::json& config, bool is_root)
     : is_root_(is_root) {
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   {
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
@@ -114,8 +118,7 @@ Solver::Solver(const nlohmann::json& config, bool is_root)
               << (simparams.use_cycle_to_cycle_error ? "true" : "false"));
   }
 
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   // Broadcast simulation parameters to all ranks for PETSc GMRES runs.
   // NOTE: Use MPI_COMM_WORLD here, NOT PETSC_COMM_WORLD, because PETSc
   // hasn't been initialized yet. PETSC_COMM_WORLD is only valid after
@@ -166,7 +169,7 @@ Solver::Solver(const SimulationParameters& simparams_in,
   std::cerr << "[Solver::Solver(streaming)] ENTER is_root=" << (is_root_ ? "true" : "false")
             << ", initial_state.y.size=" << initial_state.y.size() << std::endl;
 
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+#if defined(SVZERO_HAVE_REAL_MPI)
   int rank = 0;
   int mpi_initialized = 0;
   MPI_Initialized(&mpi_initialized);
@@ -223,7 +226,7 @@ Solver::Solver(const SimulationParameters& simparams_in,
 }
 
 void Solver::setup_initial() {
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   int rank = 0;
   int mpi_init = 0;
   MPI_Initialized(&mpi_init);
@@ -233,9 +236,6 @@ void Solver::setup_initial() {
   // Use stderr for immediate output before potential crash
   std::cerr << "[RANK " << rank << "] Solver::setup_initial - ENTER" << std::endl;
   std::cerr.flush();
-#endif
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
   DEBUG_MSG("Solver::setup_initial - ENTER, rank=" << rank
             << ", is_root=" << (is_root_ ? "true" : "false")
             << ", initial_state.y.size=" << initial_state.y.size()
@@ -246,8 +246,7 @@ void Solver::setup_initial() {
             << ", is_root=" << (is_root_ ? "true" : "false"));
 #endif
   state = initial_state;
-#if defined(SVZERODSOLVER_HAVE_PETSC) && \
-    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   DEBUG_MSG("Solver::setup_initial - rank=" << rank
             << ", state.y.size after copy=" << state.y.size());
 #endif
@@ -256,7 +255,7 @@ void Solver::setup_initial() {
   // IMPORTANT: When using PETSc GMRES, ALL ranks must participate in Integrator
   // creation and step() calls because they contain MPI collective operations.
   if (simparams.sim_steady_initial) {
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
     // For PETSc GMRES, all ranks must participate in collective operations.
     // Root rank does actual computation; non-root ranks participate in MPI collectives.
     std::cerr << "[RANK " << rank << "] setup_initial - steady_initial=true, creating Integrator" << std::endl;
@@ -345,7 +344,7 @@ void Solver::setup_initial() {
 
 void Solver::setup_integrator() {
   // Set-up integrator
-#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES) && defined(MPI_VERSION)
+#if defined(SVZERO_HAVE_REAL_MPI)
   int rank = 0;
   int mpi_init = 0;
   MPI_Initialized(&mpi_init);
