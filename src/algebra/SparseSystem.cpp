@@ -709,15 +709,21 @@ void PetscGMRESLinearSolver::analyze_pattern(
   }
 
 #ifndef NDEBUG
-  // In debug builds, request that PETSc treat any attempt to insert a new
-  // structural nonzero (i.e., a matrix entry not covered by the preallocated
-  // sparsity pattern) as an error instead of silently reallocating. This
-  // helps catch bugs where MatSetValue is called with out-of-range indices or
-  // an inconsistent sparsity pattern.
-  ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE);
-  if (ierr) {
-    throw std::runtime_error(
-        "Failed to enable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
+  // In debug builds, PETSc can be instructed to error on any attempt to insert
+  // a new structural nonzero that was not preallocated. This is useful for
+  // catching sparsity-pattern bugs, but it breaks some parallel preconditioners
+  // (e.g., GAMG) that legitimately add fill to internal matrices. Keep this
+  // OFF by default and allow users to enable it explicitly.
+  PetscBool strict_prealloc = PETSC_FALSE;
+  PetscBool strict_set = PETSC_FALSE;
+  PetscOptionsGetBool(nullptr, nullptr, "-svzero_strict_petsc_prealloc",
+                      &strict_prealloc, &strict_set);
+  if (strict_set && strict_prealloc) {
+    ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to enable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
+    }
   }
 #endif
 
@@ -757,6 +763,9 @@ void PetscGMRESLinearSolver::analyze_pattern(
 
 #ifdef SVZERODSOLVER_PETSC_PRECONDITIONER
   const char* pc_opt = SVZERODSOLVER_PETSC_PRECONDITIONER;
+  use_bjacobi_with_ilu_ = false;
+  int comm_size = 1;
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
   if (std::strcmp(pc_opt, "none") == 0) {
     ierr = PCSetType(pc, PCNONE);
   } else if (std::strcmp(pc_opt, "jacobi") == 0) {
@@ -764,7 +773,14 @@ void PetscGMRESLinearSolver::analyze_pattern(
   } else if (std::strcmp(pc_opt, "bjacobi") == 0) {
     ierr = PCSetType(pc, PCBJACOBI);
   } else if (std::strcmp(pc_opt, "ilu") == 0) {
-    ierr = PCSetType(pc, PCILU);
+    if (comm_size > 1) {
+      // ILU is not supported on parallel AIJ matrices (mpiaij). Use block Jacobi
+      // with ILU on each local block instead.
+      use_bjacobi_with_ilu_ = true;
+      ierr = PCSetType(pc, PCBJACOBI);
+    } else {
+      ierr = PCSetType(pc, PCILU);
+    }
   } else if (std::strcmp(pc_opt, "gamg") == 0) {
     ierr = PCSetType(pc, PCGAMG);
   } else if (std::strcmp(pc_opt, "hypre_BoomerAMG") == 0) {
@@ -844,6 +860,46 @@ void PetscGMRESLinearSolver::factorize(
   ierr = KSPSetFromOptions(ksp_);
   if (ierr) {
     throw std::runtime_error("Failed to apply PETSc KSP options");
+  }
+
+  // If ILU was requested in a parallel run, we mapped to PCBJACOBI in
+  // analyze_pattern. Configure each sub-PC to use ILU(0) by default.
+  if (use_bjacobi_with_ilu_) {
+    PC pc;
+    ierr = KSPGetPC(ksp_, &pc);
+    if (ierr) {
+      throw std::runtime_error("Failed to get PETSc PC for ILU setup");
+    }
+    PetscBool is_bjacobi = PETSC_FALSE;
+    ierr = PetscObjectTypeCompare((PetscObject)pc, PCBJACOBI, &is_bjacobi);
+    if (ierr) {
+      throw std::runtime_error("Failed to query PETSc PC type");
+    }
+    if (is_bjacobi) {
+      ierr = KSPSetUp(ksp_);
+      if (ierr) {
+        throw std::runtime_error("Failed to set up PETSc KSP for ILU sub-PCs");
+      }
+      PetscInt n_local_blocks = 0;
+      KSP* subksps = nullptr;
+      ierr = PCBJacobiGetSubKSP(pc, &n_local_blocks, nullptr, &subksps);
+      if (ierr) {
+        throw std::runtime_error("Failed to get PETSc BJACOBI sub-KSPs");
+      }
+      for (PetscInt i = 0; i < n_local_blocks; ++i) {
+        PC subpc;
+        ierr = KSPSetType(subksps[i], KSPPREONLY);
+        if (!ierr) {
+          ierr = KSPGetPC(subksps[i], &subpc);
+        }
+        if (!ierr) {
+          ierr = PCSetType(subpc, PCILU);
+        }
+        if (ierr) {
+          throw std::runtime_error("Failed to configure BJACOBI ILU sub-preconditioner");
+        }
+      }
+    }
   }
   std::fprintf(stderr, "[RANK %d] factorize - complete\n", comm_rank);
   std::fflush(stderr);

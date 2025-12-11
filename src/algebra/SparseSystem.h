@@ -195,6 +195,7 @@ class PetscGMRESLinearSolver : public LinearSolver {
   PetscInt n_ = 0;
   PetscInt rstart_ = 0;
   PetscInt rend_ = 0;
+  bool use_bjacobi_with_ilu_ = false;
 };
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
