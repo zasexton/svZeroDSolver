@@ -918,6 +918,21 @@ void PetscGMRESLinearSolver::factorize(
       throw std::runtime_error("Failed to query PETSc PC type (HYPRE)");
     }
     if (is_gamg || is_hypre) {
+      // Clear any globally-set strict "new nonzero" options. On some HPC
+      // systems PETSC_OPTIONS may include -mat_new_nonzero_*_err, and those
+      // flags apply to matrices created internally by GAMG/HYPRE, causing
+      // PCSetUp to abort. Clearing them here ensures AMG can add fill safely.
+      ierr = PetscOptionsClearValue(nullptr, "-mat_new_nonzero_allocation_err");
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to clear PETSc -mat_new_nonzero_allocation_err option");
+      }
+      ierr = PetscOptionsClearValue(nullptr, "-mat_new_nonzero_location_err");
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to clear PETSc -mat_new_nonzero_location_err option");
+      }
+
       ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
       if (ierr) {
         throw std::runtime_error(
