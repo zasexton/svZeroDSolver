@@ -633,9 +633,9 @@ void PetscGMRESLinearSolver::analyze_pattern(
   std::vector<PetscInt> diag_nnz_global;
   std::vector<PetscInt> off_nnz_global;
 
-  if (root) {
-    diag_nnz_global.assign(static_cast<std::size_t>(n_), 0);
-    off_nnz_global.assign(static_cast<std::size_t>(n_), 0);
+	  if (root) {
+	    diag_nnz_global.assign(static_cast<std::size_t>(n_), 0);
+	    off_nnz_global.assign(static_cast<std::size_t>(n_), 0);
 
     // Helper to compute the owning rank for a global index using the same
     // [rstart,rend) partition defined above.
@@ -652,20 +652,30 @@ void PetscGMRESLinearSolver::analyze_pattern(
       return extra + (idx - threshold) / base;
     };
 
-    for (int k = 0; k < A.outerSize(); ++k) {
-      for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
-        const PetscInt row = static_cast<PetscInt>(it.row());
-        const PetscInt col = static_cast<PetscInt>(it.col());
-        const PetscInt row_owner = owner(row);
-        const PetscInt col_owner = owner(col);
-        if (row_owner == col_owner) {
-          ++diag_nnz_global[static_cast<std::size_t>(row)];
-        } else {
-          ++off_nnz_global[static_cast<std::size_t>(row)];
-        }
-      }
-    }
-  }
+	    for (int k = 0; k < A.outerSize(); ++k) {
+	      for (Eigen::SparseMatrix<double>::InnerIterator it(A, k); it; ++it) {
+	        const PetscInt row = static_cast<PetscInt>(it.row());
+	        const PetscInt col = static_cast<PetscInt>(it.col());
+	        const PetscInt row_owner = owner(row);
+	        const PetscInt col_owner = owner(col);
+	        if (row_owner == col_owner) {
+	          ++diag_nnz_global[static_cast<std::size_t>(row)];
+	        } else {
+	          ++off_nnz_global[static_cast<std::size_t>(row)];
+	        }
+	      }
+	    }
+
+	    // Ensure each row has space for a structural diagonal entry. GAMG's
+	    // smoothed aggregation assumes every row has a diagonal nonzero; if the
+	    // diagonal is structurally absent, PCGAMGOptProlongator_AGG can fail when
+	    // it tries to add P0 into (D^{-1} A P0). We always preallocate (and later
+	    // insert) a zero diagonal to satisfy this assumption without changing
+	    // the numerical operator.
+	    for (PetscInt i = 0; i < n_; ++i) {
+	      ++diag_nnz_global[static_cast<std::size_t>(i)];
+	    }
+	  }
 
   // Build Scatterv metadata describing the row partition so that the global
   // per-row nnz counts can be distributed to each rank's local rows.
@@ -733,6 +743,26 @@ void PetscGMRESLinearSolver::analyze_pattern(
   if (ierr) {
     throw std::runtime_error(
         "Failed to disable PETSc MAT_NEW_NONZERO_LOCATION_ERR");
+  }
+
+  // Insert a structural zero diagonal on all ranks. GAMG's smoothed
+  // aggregation uses MatAYPX(..., SUBSET_NONZERO_PATTERN) assuming that
+  // A has a diagonal entry in every row so that (A*P0) contains P0's pattern.
+  // Some 0D networks can produce rows without a structural diagonal; adding
+  // a zero diagonal preserves the operator but avoids GAMG setup failures.
+  for (PetscInt i = rstart_; i < rend_; ++i) {
+    ierr = MatSetValue(A_, i, i, 0.0, INSERT_VALUES);
+    if (ierr) {
+      throw std::runtime_error("Failed to insert PETSc diagonal placeholder");
+    }
+  }
+  ierr = MatAssemblyBegin(A_, MAT_FINAL_ASSEMBLY);
+  if (ierr) {
+    throw std::runtime_error("Failed to assemble PETSc diagonal placeholders (begin)");
+  }
+  ierr = MatAssemblyEnd(A_, MAT_FINAL_ASSEMBLY);
+  if (ierr) {
+    throw std::runtime_error("Failed to assemble PETSc diagonal placeholders (end)");
   }
 
 #ifndef NDEBUG
