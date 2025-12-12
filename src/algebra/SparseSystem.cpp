@@ -766,6 +766,11 @@ void PetscGMRESLinearSolver::analyze_pattern(
   // Ensure zero-value placeholders are actually inserted (not ignored) so that
   // we can create a structural diagonal even if the Jacobian does not include
   // it for some rows.
+  // NOTE: Leaving MAT_IGNORE_ZERO_ENTRIES disabled can cause PETSc to store a
+  // large number of explicit zeros if any upstream sparse assembly emits stored
+  // zeros, which can severely hurt performance and memory usage. We therefore
+  // disable it only temporarily for the diagonal placeholder insertion below,
+  // and then re-enable it afterwards.
   ierr = MatSetOption(A_, MAT_IGNORE_ZERO_ENTRIES, PETSC_FALSE);
   if (ierr) {
     throw std::runtime_error("Failed to disable PETSc MAT_IGNORE_ZERO_ENTRIES");
@@ -820,6 +825,13 @@ void PetscGMRESLinearSolver::analyze_pattern(
              "matrix preallocation is inconsistent.";
       throw std::runtime_error(oss.str());
     }
+  }
+
+  // Restore PETSc's default behavior (ignore explicit zeros) now that the
+  // structural diagonal entries exist.
+  ierr = MatSetOption(A_, MAT_IGNORE_ZERO_ENTRIES, PETSC_TRUE);
+  if (ierr) {
+    throw std::runtime_error("Failed to enable PETSc MAT_IGNORE_ZERO_ENTRIES");
   }
 
 #ifndef NDEBUG
@@ -1607,10 +1619,30 @@ void SparseSystem::reserve(Model* model) {
       // For the PETSc backend, we still build a one-time Eigen Jacobian-style
       // sparsity pattern using the existing system matrices, but we do not
       // keep it around for repeated use.
-      DEBUG_MSG("SparseSystem::reserve - building temporary Eigen jac_pattern");
+      DEBUG_MSG("SparseSystem::reserve - building temporary Eigen jac_pattern (structural union)");
+      // IMPORTANT: Do not build the pattern via numeric sparse-matrix addition.
+      // Exact cancellations can drop structural entries (including diagonals),
+      // which leads to under-preallocation in PETSc and can crash AMG-style
+      // preconditioners like GAMG. Instead, build a pure union-of-structure.
+      std::vector<Eigen::Triplet<double>> pattern_triplets;
+      pattern_triplets.reserve(static_cast<std::size_t>(
+          E.nonZeros() + dC_dydot.nonZeros() + F.nonZeros() + dC_dy.nonZeros()));
+
+      const auto add_pattern = [&pattern_triplets](const Eigen::SparseMatrix<double>& M) {
+        for (int k = 0; k < M.outerSize(); ++k) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
+            pattern_triplets.emplace_back(it.row(), it.col(), 1.0);
+          }
+        }
+      };
+
+      add_pattern(E);
+      add_pattern(dC_dydot);
+      add_pattern(F);
+      add_pattern(dC_dy);
+
       Eigen::SparseMatrix<double> jac_pattern(F.rows(), F.cols());
-      jac_pattern.reserve(num_triplets.F + num_triplets.E);
-      jac_pattern = (E + dC_dydot) + (F + dC_dy);
+      jac_pattern.setFromTriplets(pattern_triplets.begin(), pattern_triplets.end());
       jac_pattern.makeCompressed();
       DEBUG_MSG("SparseSystem::reserve - calling solver->analyze_pattern (PETSc)");
       solver->analyze_pattern(jac_pattern);
