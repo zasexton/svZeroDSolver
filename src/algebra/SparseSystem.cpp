@@ -252,6 +252,17 @@ void ensure_petsc_initialized() {
           "Failed to install PETSc traceback error handler");
     }
 
+    // CRITICAL: Set global defaults to allow new nonzero insertions BEFORE any
+    // matrices are created. Algebraic multigrid preconditioners (GAMG, HYPRE)
+    // create internal coarse grid matrices during PCSetUp, and these matrices
+    // inherit options from the global PETSc options database. If new nonzero
+    // errors are enabled (the default in recent PETSc versions for MPIAIJ),
+    // GAMG's internal MatAXPY/MatAYPX operations will fail when building the
+    // prolongation operators. Setting these options here ensures all matrices
+    // created later (including GAMG's internal ones) will allow new nonzeros.
+    PetscOptionsSetValue(nullptr, "-mat_new_nonzero_allocation_err", "false");
+    PetscOptionsSetValue(nullptr, "-mat_new_nonzero_location_err", "false");
+
 #ifndef NDEBUG
     // NOTE: We intentionally do NOT install a SIGFPE handler here.
     // Some HPC environments (Intel MKL, PETSc internals, etc.) may trigger
@@ -918,19 +929,22 @@ void PetscGMRESLinearSolver::factorize(
       throw std::runtime_error("Failed to query PETSc PC type (HYPRE)");
     }
     if (is_gamg || is_hypre) {
-      // Clear any globally-set strict "new nonzero" options. On some HPC
-      // systems PETSC_OPTIONS may include -mat_new_nonzero_*_err, and those
-      // flags apply to matrices created internally by GAMG/HYPRE, causing
-      // PCSetUp to abort. Clearing them here ensures AMG can add fill safely.
-      ierr = PetscOptionsClearValue(nullptr, "-mat_new_nonzero_allocation_err");
+      // Explicitly disable strict "new nonzero" errors in the options database.
+      // On some HPC systems PETSC_OPTIONS may include -mat_new_nonzero_*_err,
+      // and those flags apply to matrices created internally by GAMG/HYPRE,
+      // causing PCSetUp to abort. Setting these to "false" ensures AMG can add
+      // fill safely. NOTE: We use PetscOptionsSetValue (not ClearValue) because
+      // clearing an option causes PETSc to use its default, which in recent
+      // versions errors on new nonzeros for MPIAIJ matrices.
+      ierr = PetscOptionsSetValue(nullptr, "-mat_new_nonzero_allocation_err", "false");
       if (ierr) {
         throw std::runtime_error(
-            "Failed to clear PETSc -mat_new_nonzero_allocation_err option");
+            "Failed to set PETSc -mat_new_nonzero_allocation_err to false");
       }
-      ierr = PetscOptionsClearValue(nullptr, "-mat_new_nonzero_location_err");
+      ierr = PetscOptionsSetValue(nullptr, "-mat_new_nonzero_location_err", "false");
       if (ierr) {
         throw std::runtime_error(
-            "Failed to clear PETSc -mat_new_nonzero_location_err option");
+            "Failed to set PETSc -mat_new_nonzero_location_err to false");
       }
 
       ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
