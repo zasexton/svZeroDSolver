@@ -708,7 +708,24 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to create PETSc matrix");
   }
 
+  // Ensure strict "new nonzero" errors are disabled on the operator by
+  // default, even if the user enabled them globally (e.g., via PETSC_OPTIONS).
+  // Algebraic multigrid preconditioners like GAMG/HYPRE duplicate A_ and add
+  // fill during setup; if these strict options propagate to those internal
+  // matrices, PETSc will abort with "Inserting a new nonzero ..." errors.
+  ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to disable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
+  }
+  ierr = MatSetOption(A_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_FALSE);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to disable PETSc MAT_NEW_NONZERO_LOCATION_ERR");
+  }
+
 #ifndef NDEBUG
+  bool strict_prealloc_requested = false;
   // In debug builds, PETSc can be instructed to error on any attempt to insert
   // a new structural nonzero that was not preallocated. This is useful for
   // catching sparsity-pattern bugs, but it breaks some parallel preconditioners
@@ -718,13 +735,7 @@ void PetscGMRESLinearSolver::analyze_pattern(
   PetscBool strict_set = PETSC_FALSE;
   PetscOptionsGetBool(nullptr, nullptr, "-svzero_strict_petsc_prealloc",
                       &strict_prealloc, &strict_set);
-  if (strict_set && strict_prealloc) {
-    ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE);
-    if (ierr) {
-      throw std::runtime_error(
-          "Failed to enable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
-    }
-  }
+  strict_prealloc_requested = (strict_set && strict_prealloc);
 #endif
 
   // Create matching distributed solution and RHS vectors.
@@ -758,16 +769,20 @@ void PetscGMRESLinearSolver::analyze_pattern(
     throw std::runtime_error("Failed to get PETSc PC");
   }
 
-  std::fprintf(stderr, "[RANK %d] analyze_pattern - setting up preconditioner\n", comm_rank);
-  std::fflush(stderr);
+	  std::fprintf(stderr, "[RANK %d] analyze_pattern - setting up preconditioner\n", comm_rank);
+	  std::fflush(stderr);
 
 #ifdef SVZERODSOLVER_PETSC_PRECONDITIONER
-  const char* pc_opt = SVZERODSOLVER_PETSC_PRECONDITIONER;
-  use_bjacobi_with_ilu_ = false;
-  if (std::strcmp(pc_opt, "none") == 0) {
-    ierr = PCSetType(pc, PCNONE);
-  } else if (std::strcmp(pc_opt, "jacobi") == 0) {
-    ierr = PCSetType(pc, PCJACOBI);
+	  const char* pc_opt = SVZERODSOLVER_PETSC_PRECONDITIONER;
+	#ifndef NDEBUG
+	  const bool pc_adds_fill = (std::strcmp(pc_opt, "gamg") == 0 ||
+	                             std::strcmp(pc_opt, "hypre_BoomerAMG") == 0);
+	#endif
+	  use_bjacobi_with_ilu_ = false;
+	  if (std::strcmp(pc_opt, "none") == 0) {
+	    ierr = PCSetType(pc, PCNONE);
+	  } else if (std::strcmp(pc_opt, "jacobi") == 0) {
+	    ierr = PCSetType(pc, PCJACOBI);
   } else if (std::strcmp(pc_opt, "bjacobi") == 0) {
     ierr = PCSetType(pc, PCBJACOBI);
   } else if (std::strcmp(pc_opt, "ilu") == 0) {
@@ -798,14 +813,35 @@ void PetscGMRESLinearSolver::analyze_pattern(
     // Default to Jacobi if an unknown option is provided.
     ierr = PCSetType(pc, PCJACOBI);
   }
-  if (ierr) {
-    throw std::runtime_error("Failed to set PETSc preconditioner type");
-  }
+	  if (ierr) {
+	    throw std::runtime_error("Failed to set PETSc preconditioner type");
+	  }
+
+#ifndef NDEBUG
+	  if (strict_prealloc_requested) {
+	    if (pc_adds_fill) {
+	      if (comm_rank == 0) {
+	        std::fprintf(
+	            stderr,
+	            "[RANK 0] analyze_pattern - strict PETSc preallocation requested, "
+	            "but selected preconditioner adds fill (GAMG/HYPRE). "
+	            "Disabling strict preallocation to avoid PETSc errors.\n");
+	        std::fflush(stderr);
+	      }
+	    } else {
+	      ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE);
+	      if (ierr) {
+	        throw std::runtime_error(
+	            "Failed to enable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR");
+	      }
+	    }
+	  }
+#endif
 #endif
 
-  // Create a sequential vector and a scatter to gather the distributed
-  // solution onto the root rank only. VecScatterCreateToZero will allocate
-  // x_seq_ only on rank 0.
+	  // Create a sequential vector and a scatter to gather the distributed
+	  // solution onto the root rank only. VecScatterCreateToZero will allocate
+	  // x_seq_ only on rank 0.
   std::fprintf(stderr, "[RANK %d] analyze_pattern - creating VecScatter to root\n", comm_rank);
   std::fflush(stderr);
   ierr = VecScatterCreateToZero(x_, &scatter_to_root_, &x_seq_);
@@ -858,6 +894,48 @@ void PetscGMRESLinearSolver::factorize(
   ierr = KSPSetFromOptions(ksp_);
   if (ierr) {
     throw std::runtime_error("Failed to apply PETSc KSP options");
+  }
+
+  // Some AMG-style preconditioners (e.g., GAMG, hypre BoomerAMG) will
+  // duplicate the operator matrix and add fill during setup. If strict
+  // "new nonzero" errors were enabled globally, they can propagate to those
+  // internal matrices and crash the solve. Make sure these options are off
+  // whenever such a preconditioner is selected via runtime options.
+  {
+    PC pc = nullptr;
+    ierr = KSPGetPC(ksp_, &pc);
+    if (ierr) {
+      throw std::runtime_error("Failed to get PETSc PC after options");
+    }
+    PetscBool is_gamg = PETSC_FALSE;
+    PetscBool is_hypre = PETSC_FALSE;
+    ierr = PetscObjectTypeCompare((PetscObject)pc, PCGAMG, &is_gamg);
+    if (ierr) {
+      throw std::runtime_error("Failed to query PETSc PC type (GAMG)");
+    }
+    ierr = PetscObjectTypeCompare((PetscObject)pc, PCHYPRE, &is_hypre);
+    if (ierr) {
+      throw std::runtime_error("Failed to query PETSc PC type (HYPRE)");
+    }
+    if (is_gamg || is_hypre) {
+      ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to disable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR for AMG PC");
+      }
+      ierr = MatSetOption(A_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_FALSE);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to disable PETSc MAT_NEW_NONZERO_LOCATION_ERR for AMG PC");
+      }
+      if (comm_rank == 0) {
+        std::fprintf(
+            stderr,
+            "[RANK 0] factorize - AMG preconditioner selected; strict PETSc "
+            "new-nonzero errors disabled.\n");
+        std::fflush(stderr);
+      }
+    }
   }
 
   // If ILU was requested in a parallel run, we mapped to PCBJACOBI in
