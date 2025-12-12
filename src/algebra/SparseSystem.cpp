@@ -1743,10 +1743,18 @@ void SparseSystem::update_residual(
             "PETSc GMRES RHS vector not initialized in update_residual");
       }
 
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - before VecSet(b,0)\n", rank);
+      std::fflush(stderr);
+#endif
       PetscErrorCode ierr = VecSet(b, 0.0);
       if (ierr) {
         throw std::runtime_error("Failed to zero PETSc RHS vector");
       }
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - after VecSet(b,0)\n", rank);
+      std::fflush(stderr);
+#endif
 
       if (is_root_rank()) {
         const PetscInt n = static_cast<PetscInt>(C.size());
@@ -1805,15 +1813,38 @@ void SparseSystem::update_residual(
         }
       }
 
-      DEBUG_MSG_RANK("update_residual - before VecAssembly, rank=" << rank);
+      DEBUG_MSG_RANK("update_residual - before VecAssemblyBegin, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - before VecAssemblyBegin\n", rank);
+      std::fflush(stderr);
+#endif
+#if defined(SVZERO_HAVE_REAL_MPI)
+      // Ensure all ranks have finished any VecSetValue calls before starting the
+      // collective assembly.
+      MPI_Barrier(PETSC_COMM_WORLD);
+#endif
       svzero_current_phase = SVZERO_PHASE_MPI_VEC_ASSEMBLY;
       ierr = VecAssemblyBegin(b);
       if (ierr) {
         throw std::runtime_error("Failed to begin PETSc RHS assembly");
       }
+      DEBUG_MSG_RANK("update_residual - after VecAssemblyBegin, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - after VecAssemblyBegin\n", rank);
+      std::fflush(stderr);
+#endif
+      DEBUG_MSG_RANK("update_residual - before VecAssemblyEnd, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - before VecAssemblyEnd\n", rank);
+      std::fflush(stderr);
+#endif
       ierr = VecAssemblyEnd(b);
       svzero_current_phase = SVZERO_PHASE_STEP_RESIDUAL;
-      DEBUG_MSG_RANK("update_residual - after VecAssembly, rank=" << rank);
+      DEBUG_MSG_RANK("update_residual - after VecAssemblyEnd, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_residual - after VecAssemblyEnd\n", rank);
+      std::fflush(stderr);
+#endif
 
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc RHS assembly");
@@ -1926,10 +1957,18 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
             "PETSc GMRES matrix not initialized in update_jacobian");
       }
 
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - before MatZeroEntries\n", rank);
+      std::fflush(stderr);
+#endif
       PetscErrorCode ierr = MatZeroEntries(A);
       if (ierr) {
         throw std::runtime_error("Failed to zero PETSc matrix");
       }
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - after MatZeroEntries\n", rank);
+      std::fflush(stderr);
+#endif
 
       if (is_root_rank()) {
         // J = (E + dC_dydot) * time_coeff_ydot
@@ -1998,15 +2037,38 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
         }
       }
 
-      DEBUG_MSG_RANK("update_jacobian - before MatAssembly, rank=" << rank);
+      DEBUG_MSG_RANK("update_jacobian - before MatAssemblyBegin, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - before MatAssemblyBegin\n", rank);
+      std::fflush(stderr);
+#endif
+#if defined(SVZERO_HAVE_REAL_MPI)
+      // Ensure all ranks have finished any MatSetValue calls before starting the
+      // collective matrix assembly.
+      MPI_Barrier(PETSC_COMM_WORLD);
+#endif
       svzero_current_phase = SVZERO_PHASE_MPI_MAT_ASSEMBLY;
       ierr = MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY);
       if (ierr) {
         throw std::runtime_error("Failed to begin PETSc matrix assembly");
       }
+      DEBUG_MSG_RANK("update_jacobian - after MatAssemblyBegin, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - after MatAssemblyBegin\n", rank);
+      std::fflush(stderr);
+#endif
+      DEBUG_MSG_RANK("update_jacobian - before MatAssemblyEnd, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - before MatAssemblyEnd\n", rank);
+      std::fflush(stderr);
+#endif
       ierr = MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY);
       svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
-      DEBUG_MSG_RANK("update_jacobian - after MatAssembly, rank=" << rank);
+      DEBUG_MSG_RANK("update_jacobian - after MatAssemblyEnd, rank=" << rank);
+#ifndef NDEBUG
+      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - after MatAssemblyEnd\n", rank);
+      std::fflush(stderr);
+#endif
 
       if (ierr) {
         throw std::runtime_error("Failed to end PETSc matrix assembly");
