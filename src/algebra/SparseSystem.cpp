@@ -22,9 +22,14 @@
 #include <csignal>
 #include <cstddef>
 #include <cmath>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 #if __has_include(<execinfo.h>)
 #define SVZERO_HAVE_EXECINFO 1
@@ -137,6 +142,22 @@ bool is_root_rank() {
   return true;  // mpiuni mode: always root
 #endif
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+long svzero_ru_maxrss_kb() {
+  struct rusage usage;
+  if (getrusage(RUSAGE_SELF, &usage) != 0) {
+    return -1;
+  }
+#if defined(__APPLE__)
+  // macOS reports ru_maxrss in bytes.
+  return static_cast<long>(usage.ru_maxrss / 1024);
+#else
+  // Linux reports ru_maxrss in kilobytes.
+  return static_cast<long>(usage.ru_maxrss);
+#endif
+}
+#endif
 
 // Ensure PETSc is initialized once per process.
 void ensure_petsc_initialized() {
@@ -276,27 +297,25 @@ void ensure_petsc_initialized() {
     // on any SIGFPE, but this caused crashes during PETSc collective operations
     // on non-root MPI ranks.
 
-    // Start the default logging handler so that -log_view can safely
-    // generate a summary at PetscFinalize in newer PETSc versions.
-    ierr = PetscLogDefaultBegin();
-    if (ierr) {
-      throw std::runtime_error("Failed to start PETSc default logging");
+    // Note: PETSc logging/monitors can add significant overhead for large MPI
+    // runs. Only enable these convenience defaults if the user explicitly
+    // requests them.
+    {
+      PetscBool svzero_petsc_debug = PETSC_FALSE;
+      PetscBool svzero_petsc_debug_set = PETSC_FALSE;
+      PetscOptionsGetBool(nullptr, nullptr, "-svzero_petsc_debug",
+                          &svzero_petsc_debug, &svzero_petsc_debug_set);
+      if (svzero_petsc_debug_set && svzero_petsc_debug) {
+        ierr = PetscLogDefaultBegin();
+        if (ierr) {
+          throw std::runtime_error("Failed to start PETSc default logging");
+        }
+        PetscOptionsSetValue(nullptr, "-ksp_monitor", nullptr);
+        PetscOptionsSetValue(nullptr, "-ksp_view", nullptr);
+        PetscOptionsSetValue(nullptr, "-info", nullptr);
+        PetscOptionsSetValue(nullptr, "-log_view", nullptr);
+      }
     }
-
-    // In debug builds, always enable KSP monitors and views to aid diagnosis
-    // of convergence and performance issues.
-    PetscOptionsSetValue(nullptr, "-ksp_monitor", nullptr);
-    PetscOptionsSetValue(nullptr, "-ksp_view", nullptr);
-    // Enable PETSc informational output as well so that setup/factorization
-    // progress is reported in real time.
-    PetscOptionsSetValue(nullptr, "-info", nullptr);
-    // Always generate a PETSc log summary in debug builds so that timings for
-    // the registered log stages and operations are available.
-    PetscOptionsSetValue(nullptr, "-log_view", nullptr);
-    // Enable PETSc's malloc debugging in Debug builds so that heap
-    // corruption or misuse of PETSc objects is detected as early as
-    // possible (at some performance cost).
-    PetscOptionsSetValue(nullptr, "-malloc_debug", nullptr);
 #endif
 
     if (!log_stages_registered) {
@@ -1768,7 +1787,50 @@ void SparseSystem::update_residual(
         }
 
         // Contribution from the constant term: residual -= C.
+        std::fprintf(stderr,
+                     "[RANK %d] update_residual - assembling entries: n=%" PetscInt_FMT
+                     ", nnz(E)=%lld, nnz(F)=%lld\n",
+                     rank,
+                     n,
+                     static_cast<long long>(E.nonZeros()),
+                     static_cast<long long>(F.nonZeros()));
+        std::fflush(stderr);
+
+#if defined(__unix__) || defined(__APPLE__)
+        {
+          const long maxrss_kb = svzero_ru_maxrss_kb();
+          if (maxrss_kb >= 0) {
+            std::fprintf(stderr,
+                         "[RANK %d] update_residual - ru_maxrss=%ld kB (start)\n",
+                         rank, maxrss_kb);
+            std::fflush(stderr);
+          }
+        }
+#endif
+
+        const auto wall_start = std::chrono::steady_clock::now();
+        PetscInt log_stride = (n > 0) ? (n / 20) : 1;
+        if (log_stride < 1) {
+          log_stride = 1;
+        }
         for (PetscInt i = 0; i < n; ++i) {
+          if (i > 0 && (i % log_stride) == 0) {
+            const auto now = std::chrono::steady_clock::now();
+            const double sec =
+                std::chrono::duration_cast<std::chrono::duration<double>>(now -
+                                                                          wall_start)
+                    .count();
+            std::fprintf(stderr,
+                         "[RANK %d] update_residual - C progress: i=%" PetscInt_FMT
+                         "/%" PetscInt_FMT " (%.1f%%), elapsed=%.1fs\n",
+                         rank,
+                         i,
+                         n,
+                         100.0 * static_cast<double>(i) /
+                             static_cast<double>(std::max<PetscInt>(n, 1)),
+                         sec);
+            std::fflush(stderr);
+          }
           const double val = -C[static_cast<Eigen::Index>(i)];
           residual[static_cast<Eigen::Index>(i)] += val;
           ierr = VecSetValue(b, i, static_cast<PetscScalar>(val),
@@ -1811,6 +1873,29 @@ void SparseSystem::update_residual(
             }
           }
         }
+
+        {
+          const auto wall_end = std::chrono::steady_clock::now();
+          const double sec =
+              std::chrono::duration_cast<std::chrono::duration<double>>(wall_end -
+                                                                        wall_start)
+                  .count();
+          std::fprintf(stderr,
+                       "[RANK %d] update_residual - finished VecSetValue loops in %.2fs\n",
+                       rank, sec);
+          std::fflush(stderr);
+        }
+#if defined(__unix__) || defined(__APPLE__)
+        {
+          const long maxrss_kb = svzero_ru_maxrss_kb();
+          if (maxrss_kb >= 0) {
+            std::fprintf(stderr,
+                         "[RANK %d] update_residual - ru_maxrss=%ld kB (after set)\n",
+                         rank, maxrss_kb);
+            std::fflush(stderr);
+          }
+        }
+#endif
       }
 
       DEBUG_MSG_RANK("update_residual - before VecAssemblyBegin, rank=" << rank);
@@ -1970,72 +2055,301 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
       std::fflush(stderr);
 #endif
 
-      if (is_root_rank()) {
-        // J = (E + dC_dydot) * time_coeff_ydot
-        //   + (F + dC_dy) * time_coeff_y
+	      // Optional: flush PETSc matrix assembly between major contributions to
+	      // reduce peak MatStash memory when rank 0 is inserting most values for a
+	      // distributed matrix.
+	      int comm_size = 1;
+#if defined(SVZERO_HAVE_REAL_MPI)
+	      MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+#endif
 
-        // Contribution from E.
-        for (int k = 0; k < E.outerSize(); ++k) {
-          for (Eigen::SparseMatrix<double>::InnerIterator it(E, k); it; ++it) {
-            const PetscInt row = static_cast<PetscInt>(it.row());
-            const PetscInt col = static_cast<PetscInt>(it.col());
-            const PetscScalar val =
-                static_cast<PetscScalar>(time_coeff_ydot * it.value());
-            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
-            if (ierr) {
-              throw std::runtime_error(
-                  "Failed to set PETSc matrix entry (E)");
-            }
-          }
-        }
+	      PetscInt global_rows = 0;
+	      PetscInt global_cols = 0;
+	      ierr = MatGetSize(A, &global_rows, &global_cols);
+	      if (ierr) {
+	        throw std::runtime_error("Failed to query PETSc matrix size");
+	      }
 
-        // Contribution from dC_dydot.
-        for (int k = 0; k < dC_dydot.outerSize(); ++k) {
-          for (Eigen::SparseMatrix<double>::InnerIterator it(dC_dydot, k); it;
-               ++it) {
-            const PetscInt row = static_cast<PetscInt>(it.row());
-            const PetscInt col = static_cast<PetscInt>(it.col());
-            const PetscScalar val =
-                static_cast<PetscScalar>(time_coeff_ydot * it.value());
-            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
-            if (ierr) {
-              throw std::runtime_error(
-                  "Failed to set PETSc matrix entry (dC_dydot)");
-            }
-          }
-        }
+		      bool flush_assembly = false;
+		      bool flush_assembly_defaulted = false;
+		      PetscBool flush_verbose = PETSC_FALSE;
+		      PetscInt flush_chunk_cols = 0;
+		      {
+	        PetscBool flush = PETSC_FALSE;
+	        PetscBool flush_set = PETSC_FALSE;
+	        PetscOptionsGetBool(nullptr, nullptr, "-svzero_flush_mat_assembly",
+	                            &flush, &flush_set);
+	        if (flush_set) {
+	          flush_assembly = (flush ? true : false);
+	        } else {
+	          // Heuristic default for large distributed problems: rank 0 inserts
+	          // most values into an MPIAIJ matrix, which can lead to very large
+	          // MatStash memory usage before the final assembly. Enable periodic
+	          // flushing automatically for large matrices in MPI runs unless the
+	          // user explicitly disables it.
+	          flush_assembly = (comm_size > 1 && global_cols >= 1000000);
+	          flush_assembly_defaulted = flush_assembly;
+	        }
 
-        // Contribution from F.
-        for (int k = 0; k < F.outerSize(); ++k) {
-          for (Eigen::SparseMatrix<double>::InnerIterator it(F, k); it; ++it) {
-            const PetscInt row = static_cast<PetscInt>(it.row());
-            const PetscInt col = static_cast<PetscInt>(it.col());
-            const PetscScalar val =
-                static_cast<PetscScalar>(time_coeff_y * it.value());
-            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
-            if (ierr) {
-              throw std::runtime_error(
-                  "Failed to set PETSc matrix entry (F)");
-            }
-          }
-        }
+	        PetscBool verbose = PETSC_FALSE;
+	        PetscBool verbose_set = PETSC_FALSE;
+	        PetscOptionsGetBool(nullptr, nullptr,
+	                            "-svzero_flush_mat_assembly_verbose",
+	                            &verbose, &verbose_set);
+	        flush_verbose = (verbose_set ? verbose : PETSC_FALSE);
 
-        // Contribution from dC_dy.
-        for (int k = 0; k < dC_dy.outerSize(); ++k) {
-          for (Eigen::SparseMatrix<double>::InnerIterator it(dC_dy, k); it;
-               ++it) {
-            const PetscInt row = static_cast<PetscInt>(it.row());
-            const PetscInt col = static_cast<PetscInt>(it.col());
-            const PetscScalar val =
-                static_cast<PetscScalar>(time_coeff_y * it.value());
-            ierr = MatSetValue(A, row, col, val, ADD_VALUES);
-            if (ierr) {
-              throw std::runtime_error(
-                  "Failed to set PETSc matrix entry (dC_dy)");
-            }
-          }
+	        PetscInt chunk = 0;
+	        PetscBool chunk_set = PETSC_FALSE;
+	        PetscOptionsGetInt(nullptr, nullptr, "-svzero_flush_mat_chunk_cols",
+	                           &chunk, &chunk_set);
+	        if (chunk_set) {
+	          flush_chunk_cols = chunk;
+	        } else if (flush_assembly) {
+	          // Default chunk size: large enough to reduce collective flush
+	          // overhead, but small enough to keep MatStash bounded.
+	          //
+	          // Heuristic: target ~40 flushes per assembled matrix.
+	          PetscInt default_chunk = global_cols / 40;
+	          if (default_chunk < 20000) {
+	            default_chunk = 20000;
+	          }
+	          if (default_chunk > global_cols) {
+	            default_chunk = global_cols;
+	          }
+	          flush_chunk_cols = default_chunk;
+	        } else {
+	          flush_chunk_cols = 0;
+		        }
+		      }
+
+		      // Ensure all ranks use identical flush settings to avoid collective
+		      // mismatches if PETSc options differ across ranks for any reason.
+#if defined(SVZERO_HAVE_REAL_MPI)
+		      if (comm_size > 1) {
+		        int flush_int = flush_assembly ? 1 : 0;
+		        int verbose_int = flush_verbose ? 1 : 0;
+		        int chunk_int = static_cast<int>(flush_chunk_cols);
+		        MPI_Bcast(&flush_int, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+		        MPI_Bcast(&verbose_int, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+		        MPI_Bcast(&chunk_int, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+		        flush_assembly = (flush_int != 0);
+		        flush_verbose = verbose_int ? PETSC_TRUE : PETSC_FALSE;
+		        flush_chunk_cols = static_cast<PetscInt>(chunk_int);
+		      }
+#endif
+
+			      if (flush_assembly) {
+			        if (flush_chunk_cols <= 0) {
+			          PetscInt default_chunk = global_cols / 40;
+			          if (default_chunk < 20000) {
+			            default_chunk = 20000;
+			          }
+			          if (default_chunk > global_cols) {
+			            default_chunk = global_cols;
+			          }
+			          flush_chunk_cols = default_chunk;
+			        }
+			        if (flush_chunk_cols > global_cols) {
+		          flush_chunk_cols = global_cols;
+		        }
+	        if (flush_assembly_defaulted && is_root_rank()) {
+	          std::fprintf(stderr,
+	                       "[RANK %d] update_jacobian - enabling periodic MatStash flush by default (global_size=%d, comm_size=%d, chunk_cols=%d)\n",
+	                       rank, static_cast<int>(global_cols), comm_size,
+	                       static_cast<int>(flush_chunk_cols));
+	          std::fflush(stderr);
+	        }
+	      }
+
+      const auto log_root_mem = [&](const char* label) {
+        if (!is_root_rank()) {
+          return;
         }
-      }
+#if defined(__unix__) || defined(__APPLE__)
+        const long maxrss_kb = svzero_ru_maxrss_kb();
+        if (maxrss_kb >= 0) {
+          std::fprintf(stderr,
+                       "[RANK %d] %s - ru_maxrss=%ld kB\n",
+                       rank, label, maxrss_kb);
+          std::fflush(stderr);
+        }
+#else
+        (void)label;
+#endif
+      };
+
+	      const auto flush_mat = [&](const char* label) {
+	        if (!flush_assembly) {
+	          return;
+	        }
+	        if (flush_verbose && is_root_rank()) {
+	          std::fprintf(stderr, "[RANK %d] update_jacobian - flush begin (%s)\n",
+	                       rank, label);
+	          std::fflush(stderr);
+	        }
+	        svzero_current_phase = SVZERO_PHASE_MPI_MAT_ASSEMBLY;
+	        PetscErrorCode flush_ierr = MatAssemblyBegin(A, MAT_FLUSH_ASSEMBLY);
+	        if (flush_ierr) {
+	          std::ostringstream oss;
+          oss << "Failed to begin PETSc matrix flush assembly (" << label
+              << "), ierr=" << flush_ierr;
+          throw std::runtime_error(oss.str());
+        }
+        flush_ierr = MatAssemblyEnd(A, MAT_FLUSH_ASSEMBLY);
+        svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
+	        if (flush_ierr) {
+	          std::ostringstream oss;
+	          oss << "Failed to end PETSc matrix flush assembly (" << label
+	              << "), ierr=" << flush_ierr;
+	          throw std::runtime_error(oss.str());
+	        }
+	        if (flush_verbose && is_root_rank()) {
+	          std::fprintf(stderr, "[RANK %d] update_jacobian - flush end (%s)\n",
+	                       rank, label);
+	          std::fflush(stderr);
+	        }
+	      };
+
+	      // J = (E + dC_dydot) * time_coeff_ydot + (F + dC_dy) * time_coeff_y
+	      std::chrono::steady_clock::time_point wall_start;
+	      if (is_root_rank()) {
+        const Eigen::Index nnz_E = E.nonZeros();
+        const Eigen::Index nnz_dC_dydot = dC_dydot.nonZeros();
+        const Eigen::Index nnz_F = F.nonZeros();
+        const Eigen::Index nnz_dC_dy = dC_dy.nonZeros();
+        std::fprintf(
+            stderr,
+            "[RANK %d] update_jacobian - assembling entries: nnz(E)=%lld, nnz(dC_dydot)=%lld, nnz(F)=%lld, nnz(dC_dy)=%lld\n",
+            rank,
+            static_cast<long long>(nnz_E),
+            static_cast<long long>(nnz_dC_dydot),
+            static_cast<long long>(nnz_F),
+            static_cast<long long>(nnz_dC_dy));
+        std::fflush(stderr);
+        log_root_mem("update_jacobian - before MatSetValue loops");
+	        wall_start = std::chrono::steady_clock::now();
+	      }
+
+	      // Assemble contributions in chunks with optional periodic flushes to
+	      // keep MatStash bounded when rank 0 is inserting many off-process
+	      // entries into an MPIAIJ matrix.
+		      const int chunk_cols = static_cast<int>(
+		          (flush_assembly && comm_size > 1 && flush_chunk_cols > 0)
+		              ? flush_chunk_cols
+		              : global_cols);
+
+		      auto add_sparse_column_major = [&](const Eigen::SparseMatrix<double>& M,
+		                                         double scale,
+		                                         const char* label) {
+	        // All ranks must participate in the flush loop to avoid collective
+	        // mismatches, even though only rank 0 inserts values.
+	        const int outer = static_cast<int>(global_cols);
+	        if (is_root_rank()) {
+	          if (M.rows() != global_rows || M.cols() != global_cols) {
+	            std::ostringstream oss;
+	            oss << "Eigen matrix dimension mismatch for " << label
+	                << ": expected (" << global_rows << "," << global_cols
+	                << ") but got (" << M.rows() << "," << M.cols() << ")";
+	            throw std::runtime_error(oss.str());
+	          }
+	        }
+
+		        std::vector<PetscInt> row_buf;
+		        std::vector<PetscScalar> val_buf;
+		        if (is_root_rank()) {
+		          row_buf.reserve(64);
+		          val_buf.reserve(64);
+		        }
+
+		        std::uint64_t nnz_done = 0;
+		        const double log_interval_sec = 5.0;
+		        std::chrono::steady_clock::time_point last_log = wall_start;
+		        if (is_root_rank()) {
+		          std::fprintf(
+		              stderr,
+		              "[RANK %d] update_jacobian - %s: scale=%g, outer=%d, chunk_cols=%d, flush=%d\n",
+		              rank, label, scale, outer, chunk_cols,
+		              flush_assembly ? 1 : 0);
+		          std::fflush(stderr);
+		        }
+
+		        for (int chunk_start = 0; chunk_start < outer;
+		             chunk_start += chunk_cols) {
+		          const int chunk_end = std::min(chunk_start + chunk_cols, outer);
+
+		          if (is_root_rank()) {
+		            for (int k = chunk_start; k < chunk_end; ++k) {
+		              svzero_current_block_index = static_cast<std::size_t>(k);
+		              const auto now = std::chrono::steady_clock::now();
+		              const double since_last =
+		                  std::chrono::duration_cast<std::chrono::duration<double>>(
+		                      now - last_log)
+		                      .count();
+		              if ((k == chunk_start) || (since_last >= log_interval_sec)) {
+		                const double sec =
+		                    std::chrono::duration_cast<std::chrono::duration<double>>(
+		                        now - wall_start)
+		                        .count();
+		                std::fprintf(
+		                    stderr,
+		                    "[RANK %d] update_jacobian - %s progress: outer=%d/%d (%.1f%%), nnz_done=%llu, elapsed=%.1fs\n",
+		                    rank, label, k, outer,
+		                    100.0 * static_cast<double>(k) /
+		                        static_cast<double>(outer),
+		                    static_cast<unsigned long long>(nnz_done), sec);
+		                std::fflush(stderr);
+		                last_log = now;
+		                log_root_mem("update_jacobian - progress");
+		              }
+
+		              row_buf.clear();
+		              val_buf.clear();
+		              for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it;
+		                   ++it) {
+	                row_buf.push_back(static_cast<PetscInt>(it.row()));
+	                val_buf.push_back(
+	                    static_cast<PetscScalar>(scale * it.value()));
+	              }
+
+	              if (!row_buf.empty()) {
+	                const PetscInt col = static_cast<PetscInt>(k);
+	                const PetscInt nrows =
+	                    static_cast<PetscInt>(row_buf.size());
+	                ierr = MatSetValues(A, nrows, row_buf.data(), 1, &col,
+	                                    val_buf.data(), ADD_VALUES);
+	                if (ierr) {
+	                  std::ostringstream oss;
+	                  oss << "Failed to set PETSc matrix values (" << label
+	                      << ") for column " << k << ", ierr=" << ierr;
+	                  throw std::runtime_error(oss.str());
+	                }
+	                nnz_done += static_cast<std::uint64_t>(nrows);
+	              }
+	            }
+	          }
+
+	          // Periodic flush to keep MatStash bounded.
+	          flush_mat(label);
+	        }
+	      };
+
+	      add_sparse_column_major(E, time_coeff_ydot, "E");
+	      add_sparse_column_major(dC_dydot, time_coeff_ydot, "dC_dydot");
+	      add_sparse_column_major(F, time_coeff_y, "F");
+	      add_sparse_column_major(dC_dy, time_coeff_y, "dC_dy");
+
+	      if (is_root_rank()) {
+	        const auto wall_end = std::chrono::steady_clock::now();
+	        const double sec =
+	            std::chrono::duration_cast<std::chrono::duration<double>>(wall_end -
+	                                                                      wall_start)
+	                .count();
+	        std::fprintf(stderr,
+	                     "[RANK %d] update_jacobian - finished MatSetValues loops in %.2fs\n",
+	                     rank, sec);
+	        std::fflush(stderr);
+	        log_root_mem("update_jacobian - after MatSetValues loops");
+	      }
 
       DEBUG_MSG_RANK("update_jacobian - before MatAssemblyBegin, rank=" << rank);
 #ifndef NDEBUG
