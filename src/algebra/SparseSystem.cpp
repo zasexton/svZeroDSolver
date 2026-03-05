@@ -21,6 +21,7 @@
 #include <cstring>
 #include <csignal>
 #include <cstddef>
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <sstream>
@@ -352,6 +353,79 @@ int petsc_max_iterations(PetscInt n) {
     }
   }
   return max_iters;
+}
+
+struct SvzeroCsrPattern {
+  std::vector<PetscInt> ia;
+  std::vector<PetscInt> ja;
+};
+
+SvzeroCsrPattern svzero_build_csr_pattern_with_full_diagonal(
+    const Eigen::SparseMatrix<double>& pattern) {
+  const PetscInt n = static_cast<PetscInt>(pattern.rows());
+  SvzeroCsrPattern csr;
+  csr.ia.resize(static_cast<std::size_t>(n) + 1);
+
+  std::vector<PetscInt> row_counts(static_cast<std::size_t>(n), 0);
+  std::vector<unsigned char> diag_present(static_cast<std::size_t>(n), 0);
+
+  for (int k = 0; k < pattern.outerSize(); ++k) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(pattern, k); it; ++it) {
+      const PetscInt row = static_cast<PetscInt>(it.row());
+      const PetscInt col = static_cast<PetscInt>(it.col());
+      ++row_counts[static_cast<std::size_t>(row)];
+      if (row == col) {
+        diag_present[static_cast<std::size_t>(row)] = 1;
+      }
+    }
+  }
+
+  for (PetscInt i = 0; i < n; ++i) {
+    if (!diag_present[static_cast<std::size_t>(i)]) {
+      ++row_counts[static_cast<std::size_t>(i)];
+    }
+  }
+
+  csr.ia[0] = 0;
+  for (PetscInt i = 0; i < n; ++i) {
+    csr.ia[static_cast<std::size_t>(i) + 1] =
+        csr.ia[static_cast<std::size_t>(i)] + row_counts[static_cast<std::size_t>(i)];
+  }
+
+  const PetscInt nnz = csr.ia[static_cast<std::size_t>(n)];
+  csr.ja.resize(static_cast<std::size_t>(nnz));
+
+  std::vector<PetscInt> next;
+  next.reserve(static_cast<std::size_t>(n));
+  for (PetscInt i = 0; i < n; ++i) {
+    next.push_back(csr.ia[static_cast<std::size_t>(i)]);
+  }
+
+  for (int k = 0; k < pattern.outerSize(); ++k) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(pattern, k); it; ++it) {
+      const PetscInt row = static_cast<PetscInt>(it.row());
+      const PetscInt col = static_cast<PetscInt>(it.col());
+      const PetscInt pos = next[static_cast<std::size_t>(row)]++;
+      csr.ja[static_cast<std::size_t>(pos)] = col;
+    }
+  }
+
+  for (PetscInt i = 0; i < n; ++i) {
+    if (!diag_present[static_cast<std::size_t>(i)]) {
+      const PetscInt pos = next[static_cast<std::size_t>(i)]++;
+      csr.ja[static_cast<std::size_t>(pos)] = i;
+    }
+  }
+
+  for (PetscInt i = 0; i < n; ++i) {
+    const PetscInt start = csr.ia[static_cast<std::size_t>(i)];
+    const PetscInt end = csr.ia[static_cast<std::size_t>(i) + 1];
+    auto begin = csr.ja.begin() + start;
+    auto finish = csr.ja.begin() + end;
+    std::sort(begin, finish);
+  }
+
+  return csr;
 }
 
 }  // namespace
@@ -1514,6 +1588,44 @@ void SparseSystem::reserve(Model* model) {
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
   const bool is_root = is_root_rank();
+  int comm_size = 1;
+  int comm_rank = 0;
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
+  MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+
+  bool enable_distributed_jacobian = false;
+  if (comm_rank == 0) {
+    PetscBool opt = PETSC_FALSE;
+    PetscBool opt_set = PETSC_FALSE;
+    PetscOptionsGetBool(nullptr, nullptr,
+                        "-svzero_distributed_jacobian_assembly",
+                        &opt, &opt_set);
+    if (opt_set) {
+      enable_distributed_jacobian = (opt ? true : false);
+    } else {
+      enable_distributed_jacobian = (comm_size > 1);
+    }
+  }
+  int enable_int = enable_distributed_jacobian ? 1 : 0;
+  MPI_Bcast(&enable_int, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+  enable_distributed_jacobian = (enable_int != 0) && (comm_size > 1);
+
+  // Reset any previous distributed-assembly state (reserve() may be called again
+  // when restarting or reinitializing).
+  petsc_distributed_jacobian_assembly_ = false;
+  petsc_global_size_ = 0;
+  petsc_row_start_ = 0;
+  petsc_row_end_ = 0;
+  jac_csr_ia_local_.clear();
+  jac_csr_ja_local_.clear();
+  jac_csr_vals_local_.clear();
+  jac_csr_ia_global_.clear();
+  jac_csr_ja_global_.clear();
+  jac_csr_vals_global_.clear();
+  jac_csr_ia_sendcounts_.clear();
+  jac_csr_ia_displs_.clear();
+  jac_csr_ja_sendcounts_.clear();
+  jac_csr_ja_displs_.clear();
 #else
   const bool is_root = true;
 #endif
@@ -1663,6 +1775,65 @@ void SparseSystem::reserve(Model* model) {
       Eigen::SparseMatrix<double> jac_pattern(F.rows(), F.cols());
       jac_pattern.setFromTriplets(pattern_triplets.begin(), pattern_triplets.end());
       jac_pattern.makeCompressed();
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+      if (enable_distributed_jacobian) {
+        const auto wall_start = std::chrono::steady_clock::now();
+        std::fprintf(stderr,
+                     "[RANK 0] reserve - building CSR Jacobian pattern for distributed assembly\n");
+        std::fflush(stderr);
+
+        SvzeroCsrPattern csr = svzero_build_csr_pattern_with_full_diagonal(jac_pattern);
+        jac_csr_ia_global_ = std::move(csr.ia);
+        jac_csr_ja_global_ = std::move(csr.ja);
+        jac_csr_vals_global_.assign(jac_csr_ja_global_.size(), 0.0);
+
+        jac_csr_ia_sendcounts_.resize(static_cast<std::size_t>(comm_size));
+        jac_csr_ia_displs_.resize(static_cast<std::size_t>(comm_size));
+        jac_csr_ja_sendcounts_.resize(static_cast<std::size_t>(comm_size));
+        jac_csr_ja_displs_.resize(static_cast<std::size_t>(comm_size));
+
+        const PetscInt n_global = static_cast<PetscInt>(jac_pattern.rows());
+        const PetscInt base = (comm_size > 0) ? (n_global / comm_size) : 0;
+        const PetscInt extra = (comm_size > 0) ? (n_global % comm_size) : 0;
+        for (int p = 0; p < comm_size; ++p) {
+          const PetscInt n_local_p =
+              base + ((p < static_cast<int>(extra)) ? 1 : 0);
+          PetscInt rstart_p = 0;
+          if (p < static_cast<int>(extra)) {
+            rstart_p = p * (base + 1);
+          } else {
+            rstart_p = extra * (base + 1) +
+                       (p - static_cast<int>(extra)) * base;
+          }
+          const PetscInt rend_p = rstart_p + n_local_p;
+
+          jac_csr_ia_sendcounts_[static_cast<std::size_t>(p)] =
+              static_cast<int>(n_local_p + 1);
+          jac_csr_ia_displs_[static_cast<std::size_t>(p)] =
+              static_cast<int>(rstart_p);
+
+          const PetscInt nnz_p =
+              jac_csr_ia_global_[static_cast<std::size_t>(rend_p)] -
+              jac_csr_ia_global_[static_cast<std::size_t>(rstart_p)];
+          jac_csr_ja_sendcounts_[static_cast<std::size_t>(p)] =
+              static_cast<int>(nnz_p);
+          jac_csr_ja_displs_[static_cast<std::size_t>(p)] =
+              static_cast<int>(jac_csr_ia_global_[static_cast<std::size_t>(rstart_p)]);
+        }
+
+        const auto wall_end = std::chrono::steady_clock::now();
+        const double sec =
+            std::chrono::duration_cast<std::chrono::duration<double>>(wall_end -
+                                                                      wall_start)
+                .count();
+        std::fprintf(stderr,
+                     "[RANK 0] reserve - CSR pattern built: nnz=%zu, time=%.2fs\n",
+                     jac_csr_ja_global_.size(), sec);
+        std::fflush(stderr);
+      }
+#endif
+
       DEBUG_MSG("SparseSystem::reserve - calling solver->analyze_pattern (PETSc)");
       solver->analyze_pattern(jac_pattern);
     }
@@ -1686,6 +1857,69 @@ void SparseSystem::reserve(Model* model) {
     DEBUG_MSG("SparseSystem::reserve - non-root calling solver->analyze_pattern with empty pattern");
     solver->analyze_pattern(empty);
   }
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  if (backend_ == LinearBackend::PETSc && enable_distributed_jacobian) {
+    auto petsc_solver =
+        std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
+    if (!petsc_solver) {
+      throw std::runtime_error(
+          "Distributed Jacobian assembly requires PetscGMRESLinearSolver");
+    }
+
+    petsc_global_size_ = petsc_solver->get_global_size();
+    petsc_row_start_ = petsc_solver->get_row_start();
+    petsc_row_end_ = petsc_solver->get_row_end();
+
+    const PetscInt n_local = petsc_row_end_ - petsc_row_start_;
+    jac_csr_ia_local_.resize(static_cast<std::size_t>(n_local) + 1);
+
+    // Scatter the CSR row pointer segment [rstart, rend] from rank 0.
+    svzero_current_phase = SVZERO_PHASE_MPI_SCATTER_NNZ;
+    MPI_Scatterv(is_root ? jac_csr_ia_global_.data() : nullptr,
+                 is_root ? jac_csr_ia_sendcounts_.data() : nullptr,
+                 is_root ? jac_csr_ia_displs_.data() : nullptr,
+                 MPIU_INT,
+                 jac_csr_ia_local_.data(),
+                 static_cast<int>(jac_csr_ia_local_.size()),
+                 MPIU_INT,
+                 0,
+                 PETSC_COMM_WORLD);
+
+    const PetscInt ja_base =
+        jac_csr_ia_local_.empty() ? 0 : jac_csr_ia_local_.front();
+    const PetscInt ja_end =
+        jac_csr_ia_local_.empty() ? 0 : jac_csr_ia_local_.back();
+    const PetscInt local_nnz = ja_end - ja_base;
+    for (auto& v : jac_csr_ia_local_) {
+      v -= ja_base;
+    }
+
+    jac_csr_ja_local_.resize(static_cast<std::size_t>(local_nnz));
+    MPI_Scatterv(is_root ? jac_csr_ja_global_.data() : nullptr,
+                 is_root ? jac_csr_ja_sendcounts_.data() : nullptr,
+                 is_root ? jac_csr_ja_displs_.data() : nullptr,
+                 MPIU_INT,
+                 jac_csr_ja_local_.data(),
+                 static_cast<int>(jac_csr_ja_local_.size()),
+                 MPIU_INT,
+                 0,
+                 PETSC_COMM_WORLD);
+    svzero_current_phase = SVZERO_PHASE_NONE;
+
+    jac_csr_vals_local_.resize(static_cast<std::size_t>(local_nnz));
+    petsc_distributed_jacobian_assembly_ = true;
+
+    if (is_root) {
+      std::fprintf(stderr,
+                   "[RANK 0] reserve - distributed Jacobian assembly enabled: comm_size=%d, n=%" PetscInt_FMT
+                   ", nnz=%zu\n",
+                   comm_size, petsc_global_size_, jac_csr_ja_global_.size());
+      std::fflush(stderr);
+    }
+  }
+#endif
 }
 
 void SparseSystem::update_residual(
@@ -2051,14 +2285,178 @@ void SparseSystem::update_jacobian(double time_coeff_ydot,
         throw std::runtime_error("Failed to zero PETSc matrix");
       }
 #ifndef NDEBUG
-      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - after MatZeroEntries\n", rank);
-      std::fflush(stderr);
+	      std::fprintf(stderr, "[DEBUG RANK %d] update_jacobian - after MatZeroEntries\n", rank);
+	      std::fflush(stderr);
 #endif
 
-	      // Optional: flush PETSc matrix assembly between major contributions to
-	      // reduce peak MatStash memory when rank 0 is inserting most values for a
-	      // distributed matrix.
-	      int comm_size = 1;
+	      // Fast distributed assembly path: rank 0 computes values in a CSR
+	      // ordering and scatters the per-rank row segments so that each rank only
+	      // inserts its owned rows (no MatStash/off-process MatSetValues).
+	      if (petsc_distributed_jacobian_assembly_) {
+	        const bool root = is_root_rank();
+	        bool mapping_ok = true;
+
+	        if (root) {
+	          if (jac_csr_ia_global_.empty() || jac_csr_ja_global_.empty()) {
+	            std::fprintf(stderr,
+	                         "[RANK 0] update_jacobian - distributed assembly requested but CSR pattern is missing; falling back\n");
+	            std::fflush(stderr);
+	            mapping_ok = false;
+	          } else if (jac_csr_ja_sendcounts_.empty() || jac_csr_ja_displs_.empty()) {
+	            std::fprintf(stderr,
+	                         "[RANK 0] update_jacobian - distributed assembly requested but scatter metadata is missing; falling back\n");
+	            std::fflush(stderr);
+	            mapping_ok = false;
+	          } else {
+	            if (jac_csr_vals_global_.size() != jac_csr_ja_global_.size()) {
+	              jac_csr_vals_global_.assign(jac_csr_ja_global_.size(), 0.0);
+	            } else {
+	              std::fill(jac_csr_vals_global_.begin(), jac_csr_vals_global_.end(), 0.0);
+	            }
+	          }
+	        }
+
+	        // Compute Jacobian values on rank 0 and report if the CSR pattern does
+	        // not contain an entry that appears in the Eigen matrices.
+	        if (root && mapping_ok && !jac_csr_ia_global_.empty() && !jac_csr_ja_global_.empty()) {
+	          const auto find_index = [&](PetscInt row, PetscInt col) -> PetscInt {
+	            const PetscInt start = jac_csr_ia_global_[static_cast<std::size_t>(row)];
+	            const PetscInt end = jac_csr_ia_global_[static_cast<std::size_t>(row) + 1];
+	            auto begin = jac_csr_ja_global_.begin() + start;
+	            auto finish = jac_csr_ja_global_.begin() + end;
+	            auto it = std::lower_bound(begin, finish, col);
+	            if (it == finish || *it != col) {
+	              return static_cast<PetscInt>(-1);
+	            }
+	            return static_cast<PetscInt>(start + (it - begin));
+	          };
+
+	          const auto add_matrix = [&](const Eigen::SparseMatrix<double>& M,
+	                                      double scale,
+	                                      const char* label) {
+	            if (!mapping_ok || scale == 0.0) {
+	              return;
+	            }
+	            const auto wall_start = std::chrono::steady_clock::now();
+	            std::chrono::steady_clock::time_point last_log = wall_start;
+	            std::uint64_t nnz_done = 0;
+	            const std::uint64_t nnz_total =
+	                static_cast<std::uint64_t>(M.nonZeros());
+
+	            for (int k = 0; k < M.outerSize(); ++k) {
+	              for (Eigen::SparseMatrix<double>::InnerIterator it(M, k); it; ++it) {
+	                const PetscInt row = static_cast<PetscInt>(it.row());
+	                const PetscInt col = static_cast<PetscInt>(it.col());
+	                const PetscInt idx = find_index(row, col);
+	                if (idx < 0) {
+	                  std::fprintf(stderr,
+	                               "[RANK 0] update_jacobian - CSR pattern missing (%" PetscInt_FMT
+	                               ",%" PetscInt_FMT ") from %s; falling back\n",
+	                               row, col, label);
+	                  std::fflush(stderr);
+	                  mapping_ok = false;
+	                  return;
+	                }
+	                jac_csr_vals_global_[static_cast<std::size_t>(idx)] +=
+	                    static_cast<PetscScalar>(scale * it.value());
+	                ++nnz_done;
+
+	                const auto now = std::chrono::steady_clock::now();
+	                const double since_last =
+	                    std::chrono::duration_cast<std::chrono::duration<double>>(
+	                        now - last_log)
+	                        .count();
+	                if (since_last >= 5.0) {
+	                  const double sec =
+	                      std::chrono::duration_cast<std::chrono::duration<double>>(
+	                          now - wall_start)
+	                          .count();
+	                  std::fprintf(stderr,
+	                               "[RANK 0] update_jacobian - values(%s): nnz=%llu/%llu, elapsed=%.1fs\n",
+	                               label,
+	                               static_cast<unsigned long long>(nnz_done),
+	                               static_cast<unsigned long long>(nnz_total),
+	                               sec);
+	                  std::fflush(stderr);
+	                  last_log = now;
+	                }
+	              }
+	            }
+	          };
+
+	          add_matrix(E, time_coeff_ydot, "E");
+	          add_matrix(dC_dydot, time_coeff_ydot, "dC_dydot");
+	          add_matrix(F, time_coeff_y, "F");
+	          add_matrix(dC_dy, time_coeff_y, "dC_dy");
+	        }
+
+	        int mapping_int = (root && mapping_ok) ? 1 : 0;
+	        MPI_Bcast(&mapping_int, 1, MPI_INT, 0, PETSC_COMM_WORLD);
+	        if (!mapping_int) {
+	          // Fall back to the original MatSetValues-based assembly below.
+	        } else {
+	          // Scatter the CSR values corresponding to the rows owned by each rank.
+	          svzero_current_phase = SVZERO_PHASE_MPI_SCATTER_NNZ;
+	          MPI_Scatterv(root ? jac_csr_vals_global_.data() : nullptr,
+	                       root ? jac_csr_ja_sendcounts_.data() : nullptr,
+	                       root ? jac_csr_ja_displs_.data() : nullptr,
+	                       MPIU_SCALAR,
+	                       jac_csr_vals_local_.data(),
+	                       static_cast<int>(jac_csr_vals_local_.size()),
+	                       MPIU_SCALAR,
+	                       0,
+	                       PETSC_COMM_WORLD);
+	          svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
+
+	          // Insert values for owned rows only.
+	          const PetscInt rstart = petsc_row_start_;
+	          const PetscInt rend = petsc_row_end_;
+	          const PetscInt n_local = rend - rstart;
+
+	          for (PetscInt i = 0; i < n_local; ++i) {
+	            const PetscInt global_row = rstart + i;
+	            const PetscInt start = jac_csr_ia_local_[static_cast<std::size_t>(i)];
+	            const PetscInt end =
+	                jac_csr_ia_local_[static_cast<std::size_t>(i) + 1];
+	            const PetscInt ncols = end - start;
+	            if (ncols <= 0) {
+	              continue;
+	            }
+	            ierr = MatSetValues(A,
+	                                1,
+	                                &global_row,
+	                                ncols,
+	                                jac_csr_ja_local_.data() + start,
+	                                jac_csr_vals_local_.data() + start,
+	                                INSERT_VALUES);
+	            if (ierr) {
+	              throw std::runtime_error(
+	                  "Failed to set PETSc matrix values (distributed Jacobian assembly)");
+	            }
+	          }
+
+	          // Assemble the matrix collectively.
+	          svzero_current_phase = SVZERO_PHASE_MPI_MAT_ASSEMBLY;
+	          ierr = MatAssemblyBegin(A, MAT_FINAL_ASSEMBLY);
+	          if (ierr) {
+	            throw std::runtime_error("Failed to begin PETSc matrix assembly");
+	          }
+	          ierr = MatAssemblyEnd(A, MAT_FINAL_ASSEMBLY);
+	          svzero_current_phase = SVZERO_PHASE_STEP_JACOBIAN;
+	          if (ierr) {
+	            throw std::runtime_error("Failed to end PETSc matrix assembly");
+	          }
+
+	          svzero_current_phase = SVZERO_PHASE_NONE;
+	          svzero_current_block_index = static_cast<std::size_t>(-1);
+	          return;
+	        }
+	      }
+
+		      // Optional: flush PETSc matrix assembly between major contributions to
+		      // reduce peak MatStash memory when rank 0 is inserting most values for a
+		      // distributed matrix.
+		      int comm_size = 1;
 #if defined(SVZERO_HAVE_REAL_MPI)
 	      MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
 #endif

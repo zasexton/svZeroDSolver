@@ -184,6 +184,9 @@ class PetscGMRESLinearSolver : public LinearSolver {
   Mat get_matrix() const { return A_; }
   Vec get_rhs() const { return b_; }
   Vec get_solution() const { return x_; }
+  PetscInt get_global_size() const { return n_; }
+  PetscInt get_row_start() const { return rstart_; }
+  PetscInt get_row_end() const { return rend_; }
 
  private:
   Mat A_ = nullptr;
@@ -340,6 +343,31 @@ class SparseSystem {
 
   /// Representation backend (Eigen or PETSc) used by this sparse system.
   LinearBackend backend_ = LinearBackend::Eigen;
+
+#if defined(SVZERODSOLVER_HAVE_PETSC) && \
+    defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  // When using PETSc with real MPI, we can avoid expensive off-process MatSetValues
+  // by having each rank insert only its owned rows. Rank 0 computes Jacobian
+  // values into a global CSR ordering and scatters the per-rank value segments.
+  bool petsc_distributed_jacobian_assembly_ = false;
+  PetscInt petsc_global_size_ = 0;
+  PetscInt petsc_row_start_ = 0;
+  PetscInt petsc_row_end_ = 0;
+
+  // Local CSR pattern for the Jacobian rows owned by this rank.
+  std::vector<PetscInt> jac_csr_ia_local_;
+  std::vector<PetscInt> jac_csr_ja_local_;
+  std::vector<PetscScalar> jac_csr_vals_local_;
+
+  // Root-only CSR pattern and scatter metadata.
+  std::vector<PetscInt> jac_csr_ia_global_;
+  std::vector<PetscInt> jac_csr_ja_global_;
+  std::vector<PetscScalar> jac_csr_vals_global_;
+  std::vector<int> jac_csr_ia_sendcounts_;
+  std::vector<int> jac_csr_ia_displs_;
+  std::vector<int> jac_csr_ja_sendcounts_;
+  std::vector<int> jac_csr_ja_displs_;
+#endif
 
   // When true, assembly into F/E/dC_* is performed via triplet lists instead
   // of direct coeffRef writes. This is enabled during the initial reserve()
