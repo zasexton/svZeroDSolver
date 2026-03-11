@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -70,6 +72,65 @@
 #define SVZERODSOLVER_ITERATIVE_SOLVER_MAX_ITERS 0
 #endif
 
+#ifndef SVZERODSOLVER_PETSC_GMRES_RESTART
+#define SVZERODSOLVER_PETSC_GMRES_RESTART 200
+#endif
+
+namespace {
+void dump_eigen_linear_system_once(
+    const Eigen::SparseMatrix<double>& A,
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& b) {
+  static bool dumped_once = false;
+  if (dumped_once) {
+    return;
+  }
+
+  const char* prefix = std::getenv("SVZERO_DUMP_LINEAR_SYSTEM_PREFIX");
+  if (prefix == nullptr || prefix[0] == '\0') {
+    return;
+  }
+
+  dumped_once = true;
+
+  std::string prefix_str(prefix);
+  const std::string matrix_path = prefix_str + "_A.mtx";
+  const std::string rhs_path = prefix_str + "_b.mtx";
+
+  Eigen::SparseMatrix<double> compressed = A;
+  compressed.makeCompressed();
+
+  {
+    std::ofstream out(matrix_path);
+    if (!out) {
+      throw std::runtime_error("Failed to open matrix dump path: " + matrix_path);
+    }
+    out << "%%MatrixMarket matrix coordinate real general\n";
+    out << compressed.rows() << " " << compressed.cols() << " "
+        << compressed.nonZeros() << "\n";
+    out << std::scientific << std::setprecision(17);
+    for (int k = 0; k < compressed.outerSize(); ++k) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(compressed, k); it; ++it) {
+        out << (it.row() + 1) << " " << (it.col() + 1) << " "
+            << it.value() << "\n";
+      }
+    }
+  }
+
+  {
+    std::ofstream out(rhs_path);
+    if (!out) {
+      throw std::runtime_error("Failed to open RHS dump path: " + rhs_path);
+    }
+    out << "%%MatrixMarket matrix array real general\n";
+    out << b.size() << " 1\n";
+    out << std::scientific << std::setprecision(17);
+    for (Eigen::Index i = 0; i < b.size(); ++i) {
+      out << b[i] << "\n";
+    }
+  }
+}
+}  // namespace
+
 #if defined(SVZERODSOLVER_HAVE_PETSC) && \
     defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
 static PetscLogStage stage_analyze = 0;
@@ -83,6 +144,144 @@ volatile int svzero_current_phase = SVZERO_PHASE_NONE;
 volatile double svzero_current_time = 0.0;
 
 namespace {
+int g_petsc_argc = 0;
+char** g_petsc_argv = nullptr;
+
+void dump_petsc_linear_system_once(Mat A, Vec b) {
+  static bool dumped_once = false;
+  if (dumped_once) {
+    return;
+  }
+
+  const char* prefix = std::getenv("SVZERO_DUMP_LINEAR_SYSTEM_PREFIX");
+  if (prefix == nullptr || prefix[0] == '\0') {
+    return;
+  }
+
+  dumped_once = true;
+
+  std::string prefix_str(prefix);
+  const std::string matrix_path = prefix_str + "_A.mtx";
+  const std::string rhs_path = prefix_str + "_b.mtx";
+
+  {
+    PetscViewer viewer = nullptr;
+    PetscErrorCode ierr =
+        PetscViewerASCIIOpen(PETSC_COMM_WORLD, matrix_path.c_str(), &viewer);
+    if (ierr) {
+      throw std::runtime_error("Failed to open PETSc matrix dump path: " +
+                               matrix_path);
+    }
+    ierr = PetscViewerPushFormat(viewer, PETSC_VIEWER_ASCII_MATRIXMARKET);
+    if (ierr) {
+      PetscViewerDestroy(&viewer);
+      throw std::runtime_error(
+          "Failed to configure PETSc matrix dump viewer format");
+    }
+    ierr = MatView(A, viewer);
+    if (ierr) {
+      PetscViewerDestroy(&viewer);
+      throw std::runtime_error("Failed to dump PETSc matrix to: " + matrix_path);
+    }
+    ierr = PetscViewerDestroy(&viewer);
+    if (ierr) {
+      throw std::runtime_error("Failed to finalize PETSc matrix dump viewer");
+    }
+  }
+
+  {
+    VecScatter scatter = nullptr;
+    Vec b_seq = nullptr;
+    PetscErrorCode ierr = VecScatterCreateToZero(b, &scatter, &b_seq);
+    if (ierr) {
+      throw std::runtime_error("Failed to create PETSc RHS scatter for dump");
+    }
+    ierr = VecScatterBegin(scatter, b, b_seq, INSERT_VALUES, SCATTER_FORWARD);
+    if (ierr) {
+      VecScatterDestroy(&scatter);
+      if (b_seq != nullptr) {
+        VecDestroy(&b_seq);
+      }
+      throw std::runtime_error("Failed to begin PETSc RHS scatter for dump");
+    }
+    ierr = VecScatterEnd(scatter, b, b_seq, INSERT_VALUES, SCATTER_FORWARD);
+    if (ierr) {
+      VecScatterDestroy(&scatter);
+      if (b_seq != nullptr) {
+        VecDestroy(&b_seq);
+      }
+      throw std::runtime_error("Failed to end PETSc RHS scatter for dump");
+    }
+
+    bool is_root = true;
+#if defined(SVZERO_HAVE_REAL_MPI)
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    int comm_rank = 0;
+    if (mpi_initialized) {
+      MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+      is_root = (comm_rank == 0);
+    }
+#endif
+
+    if (is_root) {
+      PetscInt n = 0;
+      const PetscScalar* pb = nullptr;
+      ierr = VecGetSize(b_seq, &n);
+      if (ierr) {
+        VecScatterDestroy(&scatter);
+        VecDestroy(&b_seq);
+        throw std::runtime_error("Failed to query PETSc RHS size for dump");
+      }
+      ierr = VecGetArrayRead(b_seq, &pb);
+      if (ierr) {
+        VecScatterDestroy(&scatter);
+        VecDestroy(&b_seq);
+        throw std::runtime_error("Failed to access PETSc RHS values for dump");
+      }
+
+      std::ofstream out(rhs_path);
+      if (!out) {
+        VecRestoreArrayRead(b_seq, &pb);
+        VecScatterDestroy(&scatter);
+        VecDestroy(&b_seq);
+        throw std::runtime_error("Failed to open RHS dump path: " + rhs_path);
+      }
+      out << "%%MatrixMarket matrix array real general\n";
+      out << n << " 1\n";
+      out << std::scientific << std::setprecision(17);
+      for (PetscInt i = 0; i < n; ++i) {
+        out << static_cast<double>(pb[i]) << "\n";
+      }
+
+      ierr = VecRestoreArrayRead(b_seq, &pb);
+      if (ierr) {
+        VecScatterDestroy(&scatter);
+        VecDestroy(&b_seq);
+        throw std::runtime_error("Failed to restore PETSc RHS values after dump");
+      }
+    }
+
+    ierr = VecScatterDestroy(&scatter);
+    if (ierr) {
+      if (b_seq != nullptr) {
+        VecDestroy(&b_seq);
+      }
+      throw std::runtime_error("Failed to destroy PETSc RHS dump scatter");
+    }
+    if (b_seq != nullptr) {
+      ierr = VecDestroy(&b_seq);
+      if (ierr) {
+        throw std::runtime_error("Failed to destroy PETSc RHS dump vector");
+      }
+    }
+  }
+
+  std::fprintf(stderr,
+               "[svZeroDSolver] Dumped PETSc linear system to '%s' and '%s'.\n",
+               matrix_path.c_str(), rhs_path.c_str());
+  std::fflush(stderr);
+}
 
 #if SVZERO_HAVE_EXECINFO
 // Simple SIGFPE handler for debug builds that prints a backtrace to stderr.
@@ -143,6 +342,393 @@ bool is_root_rank() {
   return true;  // mpiuni mode: always root
 #endif
 }
+
+void invert_and_clamp_scale_vec(Vec v, PetscReal floor_value) {
+  PetscScalar* values = nullptr;
+  PetscInt n_local = 0;
+  PetscErrorCode ierr = VecGetLocalSize(v, &n_local);
+  if (ierr) {
+    throw std::runtime_error("Failed to query PETSc scale-vector local size");
+  }
+  ierr = VecGetArray(v, &values);
+  if (ierr) {
+    throw std::runtime_error("Failed to access PETSc scale-vector values");
+  }
+
+  for (PetscInt i = 0; i < n_local; ++i) {
+    const double value = static_cast<double>(values[i]);
+    if (!std::isfinite(value) || std::fabs(value) < floor_value) {
+      values[i] = 1.0;
+    } else {
+      values[i] = static_cast<PetscScalar>(1.0 / value);
+    }
+  }
+
+  ierr = VecRestoreArray(v, &values);
+  if (ierr) {
+    throw std::runtime_error("Failed to restore PETSc scale-vector values");
+  }
+}
+
+bool compute_numeric_column_matching_permutation(
+    Mat A_seq, PetscReal floor_value, std::vector<PetscInt>& col_perm_out) {
+  PetscInt nrows = 0;
+  PetscInt ncols = 0;
+  PetscErrorCode ierr = MatGetSize(A_seq, &nrows, &ncols);
+  if (ierr || nrows != ncols || nrows <= 0) {
+    return false;
+  }
+
+  struct Candidate {
+    PetscInt col;
+    double abs_value;
+    bool strong;
+  };
+
+  std::vector<std::vector<Candidate>> adjacency(
+      static_cast<std::size_t>(nrows));
+  std::vector<double> row_best(static_cast<std::size_t>(nrows), 0.0);
+  std::vector<PetscInt> row_order(static_cast<std::size_t>(nrows));
+
+  for (PetscInt row = 0; row < nrows; ++row) {
+    PetscInt ncols_row = 0;
+    const PetscInt* cols = nullptr;
+    const PetscScalar* vals = nullptr;
+    ierr = MatGetRow(A_seq, row, &ncols_row, &cols, &vals);
+    if (ierr) {
+      return false;
+    }
+
+    auto& row_adj = adjacency[static_cast<std::size_t>(row)];
+    row_adj.reserve(static_cast<std::size_t>(ncols_row));
+    for (PetscInt k = 0; k < ncols_row; ++k) {
+      const double abs_value = std::fabs(static_cast<double>(vals[k]));
+      if (abs_value <= 0.0) {
+        continue;
+      }
+      row_adj.push_back({cols[k], abs_value, abs_value >= floor_value});
+    }
+
+    std::sort(row_adj.begin(), row_adj.end(),
+              [](const Candidate& a, const Candidate& b) {
+                if (a.strong != b.strong) {
+                  return a.strong && !b.strong;
+                }
+                if (a.abs_value != b.abs_value) {
+                  return a.abs_value > b.abs_value;
+                }
+                return a.col < b.col;
+              });
+    if (!row_adj.empty()) {
+      row_best[static_cast<std::size_t>(row)] = row_adj.front().abs_value;
+    }
+
+    ierr = MatRestoreRow(A_seq, row, &ncols_row, &cols, &vals);
+    if (ierr) {
+      return false;
+    }
+    row_order[static_cast<std::size_t>(row)] = row;
+  }
+
+  std::sort(row_order.begin(), row_order.end(),
+            [&row_best, &adjacency](PetscInt a, PetscInt b) {
+              const double wa = row_best[static_cast<std::size_t>(a)];
+              const double wb = row_best[static_cast<std::size_t>(b)];
+              if (wa != wb) {
+                return wa > wb;
+              }
+              const auto da = adjacency[static_cast<std::size_t>(a)].size();
+              const auto db = adjacency[static_cast<std::size_t>(b)].size();
+              if (da != db) {
+                return da < db;
+              }
+              return a < b;
+            });
+
+  std::vector<PetscInt> match_col_to_row(static_cast<std::size_t>(ncols), -1);
+  std::vector<PetscInt> parent_row_of_col(static_cast<std::size_t>(ncols), -1);
+  std::vector<PetscInt> parent_col_of_row(static_cast<std::size_t>(nrows), -1);
+  std::vector<unsigned char> seen_rows(static_cast<std::size_t>(nrows), 0);
+  std::vector<unsigned char> seen_cols(static_cast<std::size_t>(ncols), 0);
+  std::vector<PetscInt> queue(static_cast<std::size_t>(nrows));
+
+  for (PetscInt start_row : row_order) {
+    std::fill(seen_rows.begin(), seen_rows.end(), 0);
+    std::fill(seen_cols.begin(), seen_cols.end(), 0);
+    std::fill(parent_row_of_col.begin(), parent_row_of_col.end(), -1);
+    std::fill(parent_col_of_row.begin(), parent_col_of_row.end(), -1);
+
+    PetscInt q_begin = 0;
+    PetscInt q_end = 0;
+    queue[static_cast<std::size_t>(q_end++)] = start_row;
+    seen_rows[static_cast<std::size_t>(start_row)] = 1;
+
+    PetscInt free_col = -1;
+    while (q_begin < q_end && free_col < 0) {
+      const PetscInt row = queue[static_cast<std::size_t>(q_begin++)];
+      const auto& row_adj = adjacency[static_cast<std::size_t>(row)];
+      for (const auto& candidate : row_adj) {
+        const PetscInt col = candidate.col;
+        if (seen_cols[static_cast<std::size_t>(col)] != 0) {
+          continue;
+        }
+        seen_cols[static_cast<std::size_t>(col)] = 1;
+        parent_row_of_col[static_cast<std::size_t>(col)] = row;
+
+        const PetscInt matched_row =
+            match_col_to_row[static_cast<std::size_t>(col)];
+        if (matched_row < 0) {
+          free_col = col;
+          break;
+        }
+
+        if (seen_rows[static_cast<std::size_t>(matched_row)] == 0) {
+          seen_rows[static_cast<std::size_t>(matched_row)] = 1;
+          parent_col_of_row[static_cast<std::size_t>(matched_row)] = col;
+          queue[static_cast<std::size_t>(q_end++)] = matched_row;
+        }
+      }
+    }
+
+    if (free_col < 0) {
+      return false;
+    }
+
+    PetscInt col = free_col;
+    while (col >= 0) {
+      const PetscInt row = parent_row_of_col[static_cast<std::size_t>(col)];
+      const PetscInt prev_col =
+          parent_col_of_row[static_cast<std::size_t>(row)];
+      match_col_to_row[static_cast<std::size_t>(col)] = row;
+      col = prev_col;
+    }
+  }
+
+  col_perm_out.assign(static_cast<std::size_t>(nrows), -1);
+  for (PetscInt col = 0; col < ncols; ++col) {
+    const PetscInt row = match_col_to_row[static_cast<std::size_t>(col)];
+    if (row < 0) {
+      return false;
+    }
+    col_perm_out[static_cast<std::size_t>(row)] = col;
+  }
+  return true;
+}
+
+void destroy_is_if_set(IS& is) {
+  if (is != nullptr) {
+    ISDestroy(&is);
+    is = nullptr;
+  }
+}
+
+void create_parallel_row_is_from_global_indices(
+    const std::vector<PetscInt>& global_indices, PetscInt rstart, PetscInt rend,
+    IS& is) {
+  destroy_is_if_set(is);
+  const PetscInt local_size = rend - rstart;
+  PetscErrorCode ierr =
+      ISCreateGeneral(PETSC_COMM_WORLD, local_size,
+                      global_indices.data() + rstart, PETSC_COPY_VALUES, &is);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to create PETSc row-permutation index set");
+  }
+  ierr = ISSetPermutation(is);
+  if (ierr) {
+    throw std::runtime_error("Failed to mark PETSc row permutation index set");
+  }
+}
+
+void create_parallel_col_is_from_global_indices(
+    const std::vector<PetscInt>& global_indices, PetscInt cstart, PetscInt cend,
+    IS& is) {
+  destroy_is_if_set(is);
+  const PetscInt local_size = cend - cstart;
+  PetscErrorCode ierr =
+      ISCreateGeneral(PETSC_COMM_WORLD, local_size,
+                      global_indices.data() + cstart, PETSC_COPY_VALUES, &is);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to create PETSc column-permutation index set");
+  }
+  ierr = ISSetPermutation(is);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to mark PETSc column permutation index set");
+  }
+}
+
+bool build_numeric_matching_ordering(Mat A, PetscInt n, PetscInt rstart,
+                                     PetscInt rend, int comm_size,
+                                     PetscReal floor_value, IS& row_perm,
+                                     IS& col_perm) {
+  PetscInt cstart = 0;
+  PetscInt cend = 0;
+  PetscErrorCode ierr = MatGetOwnershipRangeColumn(A, &cstart, &cend);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to query PETSc column ownership for numeric matching");
+  }
+
+  Mat A_redundant = nullptr;
+  ierr = MatCreateRedundantMatrix(A, comm_size, MPI_COMM_NULL,
+                                  MAT_INITIAL_MATRIX, &A_redundant);
+  if (ierr) {
+    return false;
+  }
+
+  std::vector<PetscInt> col_perm_indices;
+  const bool matched = compute_numeric_column_matching_permutation(
+      A_redundant, floor_value, col_perm_indices);
+
+  PetscErrorCode destroy_ierr = MatDestroy(&A_redundant);
+  if (destroy_ierr) {
+    throw std::runtime_error(
+        "Failed to destroy redundant PETSc matrix after numeric matching");
+  }
+
+  if (!matched || static_cast<PetscInt>(col_perm_indices.size()) != n) {
+    return false;
+  }
+
+  std::vector<PetscInt> row_perm_indices(static_cast<std::size_t>(n));
+  for (PetscInt i = 0; i < n; ++i) {
+    row_perm_indices[static_cast<std::size_t>(i)] = i;
+  }
+
+  create_parallel_row_is_from_global_indices(row_perm_indices, rstart, rend,
+                                             row_perm);
+  try {
+    create_parallel_col_is_from_global_indices(col_perm_indices, cstart, cend,
+                                               col_perm);
+  } catch (...) {
+    destroy_is_if_set(row_perm);
+    throw;
+  }
+  return true;
+}
+
+void create_solution_unpermute_scatter(Vec x_permuted, Vec x_original,
+                                       IS col_perm, PetscInt rstart,
+                                       PetscInt rend,
+                                       VecScatter& scatter_out) {
+  if (scatter_out != nullptr) {
+    PetscErrorCode destroy_ierr = VecScatterDestroy(&scatter_out);
+    if (destroy_ierr) {
+      throw std::runtime_error(
+          "Failed to destroy PETSc solution unpermute scatter");
+    }
+  }
+
+  IS col_perm_global = nullptr;
+  PetscErrorCode ierr = ISAllGather(col_perm, &col_perm_global);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to gather PETSc column permutation for solution scatter");
+  }
+
+  PetscInt n = 0;
+  ierr = ISGetSize(col_perm_global, &n);
+  if (ierr) {
+    ISDestroy(&col_perm_global);
+    throw std::runtime_error(
+        "Failed to query PETSc gathered column permutation size");
+  }
+
+  const PetscInt* col_perm_indices = nullptr;
+  ierr = ISGetIndices(col_perm_global, &col_perm_indices);
+  if (ierr) {
+    ISDestroy(&col_perm_global);
+    throw std::runtime_error(
+        "Failed to access PETSc gathered column permutation indices");
+  }
+
+  std::vector<PetscInt> inverse_col_perm(static_cast<std::size_t>(n), -1);
+  for (PetscInt permuted_idx = 0; permuted_idx < n; ++permuted_idx) {
+    const PetscInt original_idx =
+        col_perm_indices[static_cast<std::size_t>(permuted_idx)];
+    if (original_idx < 0 || original_idx >= n) {
+      ISRestoreIndices(col_perm_global, &col_perm_indices);
+      ISDestroy(&col_perm_global);
+      throw std::runtime_error(
+          "PETSc column permutation contains an out-of-range index");
+    }
+    inverse_col_perm[static_cast<std::size_t>(original_idx)] = permuted_idx;
+  }
+
+  ierr = ISRestoreIndices(col_perm_global, &col_perm_indices);
+  if (ierr) {
+    ISDestroy(&col_perm_global);
+    throw std::runtime_error(
+        "Failed to restore PETSc gathered column permutation indices");
+  }
+  ierr = ISDestroy(&col_perm_global);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to destroy PETSc gathered column permutation");
+  }
+
+  const PetscInt local_size = rend - rstart;
+  std::vector<PetscInt> source_indices(static_cast<std::size_t>(local_size));
+  for (PetscInt local_i = 0; local_i < local_size; ++local_i) {
+    const PetscInt original_idx = rstart + local_i;
+    const PetscInt permuted_idx =
+        inverse_col_perm[static_cast<std::size_t>(original_idx)];
+    if (permuted_idx < 0) {
+      throw std::runtime_error(
+          "PETSc column permutation is missing an inverse entry");
+    }
+    source_indices[static_cast<std::size_t>(local_i)] = permuted_idx;
+  }
+
+  IS is_from = nullptr;
+  IS is_to = nullptr;
+  ierr = ISCreateGeneral(PETSC_COMM_WORLD, local_size, source_indices.data(),
+                         PETSC_COPY_VALUES, &is_from);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to create PETSc source index set for solution scatter");
+  }
+  ierr = ISCreateStride(PETSC_COMM_WORLD, local_size, rstart, 1, &is_to);
+  if (ierr) {
+    ISDestroy(&is_from);
+    throw std::runtime_error(
+        "Failed to create PETSc destination index set for solution scatter");
+  }
+  ierr = VecScatterCreate(x_permuted, is_from, x_original, is_to,
+                          &scatter_out);
+  if (ierr) {
+    ISDestroy(&is_from);
+    ISDestroy(&is_to);
+    throw std::runtime_error(
+        "Failed to create PETSc solution unpermute scatter");
+  }
+  ierr = ISDestroy(&is_from);
+  if (ierr) {
+    ISDestroy(&is_to);
+    throw std::runtime_error(
+        "Failed to destroy PETSc solution-scatter source index set");
+  }
+  ierr = ISDestroy(&is_to);
+  if (ierr) {
+    throw std::runtime_error(
+        "Failed to destroy PETSc solution-scatter destination index set");
+  }
+}
+
+}  // namespace
+
+namespace svzero {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+void set_petsc_initialize_args(int argc, char** argv) {
+  g_petsc_argc = argc;
+  g_petsc_argv = argv;
+}
+#endif
+}  // namespace svzero
+
+namespace {
 
 #if defined(__unix__) || defined(__APPLE__)
 long svzero_ru_maxrss_kb() {
@@ -221,7 +807,9 @@ void ensure_petsc_initialized() {
 #endif
 
     DEBUG_MSG("ensure_petsc_initialized - calling PetscInitialize");
-    PetscErrorCode ierr = PetscInitialize(nullptr, nullptr, nullptr, nullptr);
+    PetscErrorCode ierr = PetscInitialize(
+        g_petsc_argc > 0 ? &g_petsc_argc : nullptr,
+        g_petsc_argv != nullptr ? &g_petsc_argv : nullptr, nullptr, nullptr);
     if (ierr) {
       throw std::runtime_error("Failed to initialize PETSc");
     }
@@ -347,9 +935,9 @@ int petsc_max_iterations(PetscInt n) {
     if (n <= 5000) {
       max_iters = std::max<PetscInt>(50, n);
     } else if (n <= 100000) {
-      max_iters = 5000;
-    } else {
       max_iters = 10000;
+    } else {
+      max_iters = 20000;
     }
   }
   return max_iters;
@@ -603,11 +1191,32 @@ PetscGMRESLinearSolver::PetscGMRESLinearSolver() {
 
 PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
   DEBUG_MSG("PetscGMRESLinearSolver::~PetscGMRESLinearSolver - destroying");
+  if (col_perm_ != nullptr) {
+    ISDestroy(&col_perm_);
+  }
+  if (row_perm_ != nullptr) {
+    ISDestroy(&row_perm_);
+  }
   if (scatter_to_root_ != nullptr) {
     VecScatterDestroy(&scatter_to_root_);
   }
+  if (scatter_work_to_original_ != nullptr) {
+    VecScatterDestroy(&scatter_work_to_original_);
+  }
   if (x_seq_ != nullptr) {
     VecDestroy(&x_seq_);
+  }
+  if (x_work_ != nullptr) {
+    VecDestroy(&x_work_);
+  }
+  if (b_work_ != nullptr) {
+    VecDestroy(&b_work_);
+  }
+  if (row_scale_ != nullptr) {
+    VecDestroy(&row_scale_);
+  }
+  if (col_scale_ != nullptr) {
+    VecDestroy(&col_scale_);
   }
   if (x_ != nullptr) {
     VecDestroy(&x_);
@@ -620,6 +1229,9 @@ PetscGMRESLinearSolver::~PetscGMRESLinearSolver() {
   }
   if (A_ != nullptr) {
     MatDestroy(&A_);
+  }
+  if (A_solve_ != nullptr) {
+    MatDestroy(&A_solve_);
   }
 }
 
@@ -656,13 +1268,33 @@ void PetscGMRESLinearSolver::analyze_pattern(
     MatDestroy(&A_);
     A_ = nullptr;
   }
+  if (A_solve_ != nullptr) {
+    MatDestroy(&A_solve_);
+    A_solve_ = nullptr;
+  }
   if (x_ != nullptr) {
     VecDestroy(&x_);
     x_ = nullptr;
   }
+  if (x_work_ != nullptr) {
+    VecDestroy(&x_work_);
+    x_work_ = nullptr;
+  }
+  if (row_scale_ != nullptr) {
+    VecDestroy(&row_scale_);
+    row_scale_ = nullptr;
+  }
   if (b_ != nullptr) {
     VecDestroy(&b_);
     b_ = nullptr;
+  }
+  if (b_work_ != nullptr) {
+    VecDestroy(&b_work_);
+    b_work_ = nullptr;
+  }
+  if (col_scale_ != nullptr) {
+    VecDestroy(&col_scale_);
+    col_scale_ = nullptr;
   }
   if (ksp_ != nullptr) {
     KSPDestroy(&ksp_);
@@ -676,6 +1308,20 @@ void PetscGMRESLinearSolver::analyze_pattern(
     VecScatterDestroy(&scatter_to_root_);
     scatter_to_root_ = nullptr;
   }
+  if (scatter_work_to_original_ != nullptr) {
+    VecScatterDestroy(&scatter_work_to_original_);
+    scatter_work_to_original_ = nullptr;
+  }
+  if (row_perm_ != nullptr) {
+    ISDestroy(&row_perm_);
+    row_perm_ = nullptr;
+  }
+  if (col_perm_ != nullptr) {
+    ISDestroy(&col_perm_);
+    col_perm_ = nullptr;
+  }
+  use_permuted_system_ = false;
+  use_scaled_system_ = false;
 
   PetscErrorCode ierr;
 
@@ -1060,7 +1706,9 @@ void PetscGMRESLinearSolver::analyze_pattern(
 void PetscGMRESLinearSolver::factorize(
     const Eigen::SparseMatrix<double>& A) {
   int comm_rank = 0;
+  int comm_size = 1;
   MPI_Comm_rank(PETSC_COMM_WORLD, &comm_rank);
+  MPI_Comm_size(PETSC_COMM_WORLD, &comm_size);
   std::fprintf(stderr, "[RANK %d] PetscGMRESLinearSolver::factorize - ENTER\n", comm_rank);
   std::fflush(stderr);
   DEBUG_MSG("PetscGMRESLinearSolver::factorize - begin");
@@ -1074,9 +1722,242 @@ void PetscGMRESLinearSolver::factorize(
   // options. The Eigen matrix argument is ignored for the PETSc backend.
   (void)A;
 
+  PetscBool permute_system = PETSC_TRUE;
+  PetscBool permute_system_set = PETSC_FALSE;
+  PetscErrorCode ierr = PetscOptionsGetBool(nullptr, nullptr,
+                                            "-svzero_ksp_permute",
+                                            &permute_system,
+                                            &permute_system_set);
+  if (ierr) {
+    throw std::runtime_error("Failed to read PETSc linear-system permutation option");
+  }
+
+  Mat operator_matrix = A_;
+  use_permuted_system_ = (permute_system == PETSC_TRUE);
+  use_scaled_system_ = PETSC_FALSE;
+  if (A_solve_ != nullptr) {
+    MatDestroy(&A_solve_);
+    A_solve_ = nullptr;
+  }
+
+  if (use_permuted_system_) {
+    static constexpr char kNumericMatchingOrdering[] =
+        "svzero_numeric_match";
+    char ordering_name[64];
+    std::strncpy(ordering_name, kNumericMatchingOrdering,
+                 sizeof(ordering_name));
+    ordering_name[sizeof(ordering_name) - 1] = '\0';
+    PetscBool ordering_set = PETSC_FALSE;
+    ierr = PetscOptionsGetString(nullptr, nullptr, "-svzero_ksp_ordering",
+                                 ordering_name, sizeof(ordering_name),
+                                 &ordering_set);
+    if (ierr) {
+      throw std::runtime_error("Failed to read PETSc matrix ordering option");
+    }
+
+    if (row_perm_ == nullptr || col_perm_ == nullptr) {
+      const bool use_numeric_matching =
+          !ordering_set ||
+          std::strcmp(ordering_name, kNumericMatchingOrdering) == 0 ||
+          std::strcmp(ordering_name, MATORDERINGWBM) == 0;
+      bool built_custom_matching = false;
+
+      if (use_numeric_matching) {
+        PetscReal matching_floor = 1e-8;
+        PetscBool matching_floor_set = PETSC_FALSE;
+        ierr = PetscOptionsGetReal(nullptr, nullptr,
+                                   "-svzero_ksp_matching_floor",
+                                   &matching_floor, &matching_floor_set);
+        if (ierr) {
+          throw std::runtime_error(
+              "Failed to read PETSc numeric-matching floor option");
+        }
+
+        built_custom_matching = build_numeric_matching_ordering(
+            A_, n_, rstart_, rend_, comm_size, matching_floor, row_perm_,
+            col_perm_);
+        if (!built_custom_matching) {
+          destroy_is_if_set(row_perm_);
+          destroy_is_if_set(col_perm_);
+          if (ordering_set &&
+              std::strcmp(ordering_name, kNumericMatchingOrdering) == 0) {
+            throw std::runtime_error(
+                "Failed to build svZero numeric column-matching ordering");
+          }
+        } else if (comm_rank == 0) {
+          std::fprintf(stderr,
+                       "[RANK 0] factorize - using numeric column matching "
+                       "ordering='%s', matching_floor=%g, comm_size=%d\n",
+                       kNumericMatchingOrdering,
+                       static_cast<double>(matching_floor), comm_size);
+          std::fflush(stderr);
+        }
+      }
+
+      if (!built_custom_matching) {
+        PetscReal reorder_diag_tol = 1e-12;
+        PetscBool reorder_tol_set = PETSC_FALSE;
+        ierr = PetscOptionsGetReal(nullptr, nullptr,
+                                   "-svzero_ksp_reorder_diagonal_tol",
+                                   &reorder_diag_tol, &reorder_tol_set);
+        if (ierr) {
+          throw std::runtime_error(
+              "Failed to read PETSc diagonal-reorder tolerance option");
+        }
+
+        const char* petsc_ordering =
+            (!ordering_set || std::strcmp(ordering_name, MATORDERINGWBM) == 0)
+                ? MATORDERINGRCM
+                : ordering_name;
+        ierr = MatGetOrdering(A_, petsc_ordering, &row_perm_, &col_perm_);
+        if (ierr) {
+          throw std::runtime_error("Failed to compute PETSc matrix ordering");
+        }
+
+        ierr = MatReorderForNonzeroDiagonal(A_, reorder_diag_tol,
+                                            row_perm_, col_perm_);
+        if (ierr) {
+          throw std::runtime_error(
+              "Failed to improve PETSc ordering for nonzero diagonal");
+        }
+
+        if (comm_rank == 0) {
+          std::fprintf(stderr,
+                       "[RANK 0] factorize - permuting PETSc linear system "
+                       "using ordering='%s', reorder_diagonal_tol=%g, "
+                       "comm_size=%d\n",
+                       petsc_ordering, static_cast<double>(reorder_diag_tol),
+                       comm_size);
+          std::fflush(stderr);
+        }
+      }
+    }
+
+    ierr = MatPermute(A_, row_perm_, col_perm_, &A_solve_);
+    if (ierr) {
+      throw std::runtime_error("Failed to permute PETSc matrix for solve");
+    }
+
+    ierr = MatSetOption(A_solve_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to disable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR on permuted matrix");
+    }
+    ierr = MatSetOption(A_solve_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_FALSE);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to disable PETSc MAT_NEW_NONZERO_LOCATION_ERR on permuted matrix");
+    }
+    ierr = MatSetOption(A_solve_, MAT_IGNORE_ZERO_ENTRIES, PETSC_TRUE);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to enable PETSc MAT_IGNORE_ZERO_ENTRIES on permuted matrix");
+    }
+
+    if (b_work_ == nullptr) {
+      ierr = VecDuplicate(b_, &b_work_);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to allocate permuted PETSc RHS work vector");
+      }
+    }
+    if (x_work_ == nullptr) {
+      ierr = VecDuplicate(x_, &x_work_);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to allocate permuted PETSc solution work vector");
+      }
+    }
+    if (scatter_work_to_original_ == nullptr) {
+      create_solution_unpermute_scatter(x_work_, x_, col_perm_, rstart_,
+                                        rend_, scatter_work_to_original_);
+    }
+    if (row_scale_ == nullptr) {
+      ierr = VecDuplicate(b_, &row_scale_);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to allocate PETSc row-scaling vector");
+      }
+    }
+    if (col_scale_ == nullptr) {
+      ierr = VecDuplicate(x_, &col_scale_);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to allocate PETSc column-scaling vector");
+      }
+    }
+
+    PetscBool scale_system = PETSC_FALSE;
+    PetscBool scale_system_set = PETSC_FALSE;
+    ierr = PetscOptionsGetBool(nullptr, nullptr, "-svzero_ksp_scale",
+                               &scale_system, &scale_system_set);
+    if (ierr) {
+      throw std::runtime_error("Failed to read PETSc scale option");
+    }
+    use_scaled_system_ = (scale_system == PETSC_TRUE);
+
+    if (use_scaled_system_) {
+      PetscReal scale_floor = 1e-12;
+      PetscBool scale_floor_set = PETSC_FALSE;
+      ierr = PetscOptionsGetReal(nullptr, nullptr, "-svzero_ksp_scale_floor",
+                                 &scale_floor, &scale_floor_set);
+      if (ierr) {
+        throw std::runtime_error("Failed to read PETSc scale-floor option");
+      }
+
+      ierr = MatGetRowMaxAbs(A_solve_, row_scale_, nullptr);
+      if (ierr) {
+        throw std::runtime_error("Failed to compute PETSc row scaling");
+      }
+      invert_and_clamp_scale_vec(row_scale_, scale_floor);
+      ierr = MatDiagonalScale(A_solve_, row_scale_, nullptr);
+      if (ierr) {
+        throw std::runtime_error("Failed to apply PETSc row scaling");
+      }
+
+      std::vector<PetscReal> col_norms(static_cast<std::size_t>(n_));
+      ierr = MatGetColumnNorms(A_solve_, NORM_INFINITY, col_norms.data());
+      if (ierr) {
+        throw std::runtime_error("Failed to compute PETSc column scaling");
+      }
+      PetscInt cstart = 0;
+      PetscInt cend = 0;
+      ierr = VecGetOwnershipRange(col_scale_, &cstart, &cend);
+      if (ierr) {
+        throw std::runtime_error(
+            "Failed to query PETSc column-scale ownership range");
+      }
+      PetscScalar* col_values = nullptr;
+      ierr = VecGetArray(col_scale_, &col_values);
+      if (ierr) {
+        throw std::runtime_error("Failed to access PETSc column-scale values");
+      }
+      for (PetscInt i = cstart; i < cend; ++i) {
+        const double norm =
+            static_cast<double>(col_norms[static_cast<std::size_t>(i)]);
+        const PetscInt local_i = i - cstart;
+        if (!std::isfinite(norm) || std::fabs(norm) < scale_floor) {
+          col_values[local_i] = 1.0;
+        } else {
+          col_values[local_i] = static_cast<PetscScalar>(1.0 / norm);
+        }
+      }
+      ierr = VecRestoreArray(col_scale_, &col_values);
+      if (ierr) {
+        throw std::runtime_error("Failed to restore PETSc column-scale values");
+      }
+      ierr = MatDiagonalScale(A_solve_, nullptr, col_scale_);
+      if (ierr) {
+        throw std::runtime_error("Failed to apply PETSc column scaling");
+      }
+    }
+
+    operator_matrix = A_solve_;
+  }
+
   std::fprintf(stderr, "[RANK %d] factorize - KSPSetOperators\n", comm_rank);
   std::fflush(stderr);
-  PetscErrorCode ierr = KSPSetOperators(ksp_, A_, A_);
+  ierr = KSPSetOperators(ksp_, operator_matrix, operator_matrix);
   if (ierr) {
     throw std::runtime_error("Failed to set PETSc KSP operators");
   }
@@ -1086,6 +1967,13 @@ void PetscGMRESLinearSolver::factorize(
                           PETSC_DEFAULT, PETSC_DEFAULT, max_iters);
   if (ierr) {
     throw std::runtime_error("Failed to set PETSc KSP tolerances");
+  }
+
+  const int gmres_restart =
+      std::max(1, std::min(max_iters, SVZERODSOLVER_PETSC_GMRES_RESTART));
+  ierr = KSPGMRESSetRestart(ksp_, gmres_restart);
+  if (ierr) {
+    throw std::runtime_error("Failed to set PETSc GMRES restart length");
   }
 
   // Allow command-line options to further tune the solver if desired.
@@ -1139,12 +2027,14 @@ void PetscGMRESLinearSolver::factorize(
             "Failed to set PETSc -mat_new_nonzero_location_err to false");
       }
 
-      ierr = MatSetOption(A_, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_FALSE);
+      ierr = MatSetOption(operator_matrix, MAT_NEW_NONZERO_ALLOCATION_ERR,
+                          PETSC_FALSE);
       if (ierr) {
         throw std::runtime_error(
             "Failed to disable PETSc MAT_NEW_NONZERO_ALLOCATION_ERR for AMG PC");
       }
-      ierr = MatSetOption(A_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_FALSE);
+      ierr = MatSetOption(operator_matrix, MAT_NEW_NONZERO_LOCATION_ERR,
+                          PETSC_FALSE);
       if (ierr) {
         throw std::runtime_error(
             "Failed to disable PETSc MAT_NEW_NONZERO_LOCATION_ERR for AMG PC");
@@ -1258,7 +2148,34 @@ void PetscGMRESLinearSolver::solve(
 
   std::fprintf(stderr, "[RANK %d] solve - zeroing solution vector\n", rank);
   std::fflush(stderr);
-  PetscErrorCode ierr = VecSet(x_, 0.0);
+  Vec solve_rhs = b_;
+  Vec solve_x = x_;
+  PetscErrorCode ierr = 0;
+  if (use_permuted_system_) {
+    if (row_perm_ == nullptr || col_perm_ == nullptr || b_work_ == nullptr ||
+        x_work_ == nullptr) {
+      throw std::runtime_error(
+          "Permuted PETSc solve requested, but transform state is not initialized");
+    }
+    ierr = VecCopy(b_, b_work_);
+    if (!ierr) {
+      ierr = VecPermute(b_work_, row_perm_, PETSC_FALSE);
+    }
+    if (!ierr && use_scaled_system_) {
+      if (row_scale_ == nullptr) {
+        throw std::runtime_error(
+            "Scaled PETSc solve requested, but row scale is not initialized");
+      }
+      ierr = VecPointwiseMult(b_work_, b_work_, row_scale_);
+    }
+    if (ierr) {
+      throw std::runtime_error("Failed to transform PETSc RHS for solve");
+    }
+    solve_rhs = b_work_;
+    solve_x = x_work_;
+  }
+
+  ierr = VecSet(solve_x, 0.0);
   if (ierr) {
     throw std::runtime_error("Failed to zero PETSc solution vector");
   }
@@ -1267,7 +2184,7 @@ void PetscGMRESLinearSolver::solve(
   std::fflush(stderr);
   DEBUG_MSG_RANK("solve - before KSPSolve, rank=" << rank);
   svzero_current_phase = SVZERO_PHASE_PETSC_KSP_SOLVE;
-  ierr = KSPSolve(ksp_, b_, x_);
+  ierr = KSPSolve(ksp_, solve_rhs, solve_x);
   svzero_current_phase = SVZERO_PHASE_NONE;
   std::fprintf(stderr, "[RANK %d] solve - KSPSolve returned, ierr=%d\n", rank, static_cast<int>(ierr));
   std::fflush(stderr);
@@ -1289,16 +2206,104 @@ void PetscGMRESLinearSolver::solve(
   PetscReal rnorm = 0.0;
   KSPGetIterationNumber(ksp_, &its);
   KSPGetResidualNorm(ksp_, &rnorm);
+
+  if (use_permuted_system_) {
+    if (use_scaled_system_) {
+      if (col_scale_ == nullptr) {
+        throw std::runtime_error(
+            "Scaled PETSc solve requested, but column scale is not initialized");
+      }
+      ierr = VecPointwiseMult(x_work_, x_work_, col_scale_);
+      if (ierr) {
+        throw std::runtime_error("Failed to unscale PETSc solution");
+      }
+    }
+    if (scatter_work_to_original_ == nullptr) {
+      throw std::runtime_error(
+          "Permuted PETSc solve requested, but solution scatter is not initialized");
+    }
+    ierr = VecSet(x_, 0.0);
+    if (!ierr) {
+      ierr = VecScatterBegin(scatter_work_to_original_, x_work_, x_,
+                             INSERT_VALUES, SCATTER_FORWARD);
+    }
+    if (!ierr) {
+      ierr = VecScatterEnd(scatter_work_to_original_, x_work_, x_,
+                           INSERT_VALUES, SCATTER_FORWARD);
+    }
+    if (ierr) {
+      throw std::runtime_error("Failed to map PETSc solution back to original ordering");
+    }
+  }
+
+  PetscReal true_rnorm = 0.0;
+  PetscReal rel_true_rnorm = 0.0;
+  PetscReal bnorm = 0.0;
+  {
+    Vec r = nullptr;
+    ierr = VecDuplicate(b_, &r);
+    if (ierr) {
+      throw std::runtime_error("Failed to allocate PETSc true-residual vector");
+    }
+    ierr = MatMult(A_, x_, r);
+    if (ierr) {
+      VecDestroy(&r);
+      throw std::runtime_error("Failed to compute PETSc true residual (MatMult)");
+    }
+    ierr = VecAXPY(r, -1.0, b_);
+    if (ierr) {
+      VecDestroy(&r);
+      throw std::runtime_error("Failed to compute PETSc true residual (VecAXPY)");
+    }
+    ierr = VecNorm(r, NORM_2, &true_rnorm);
+    if (ierr) {
+      VecDestroy(&r);
+      throw std::runtime_error("Failed to compute PETSc true residual norm");
+    }
+    ierr = VecNorm(b_, NORM_2, &bnorm);
+    if (ierr) {
+      VecDestroy(&r);
+      throw std::runtime_error("Failed to compute PETSc RHS norm");
+    }
+    rel_true_rnorm =
+        (bnorm > 0.0) ? (true_rnorm / bnorm) : true_rnorm;
+    ierr = VecDestroy(&r);
+    if (ierr) {
+      throw std::runtime_error(
+          "Failed to destroy PETSc true-residual work vector");
+    }
+  }
+
+  PC pc = nullptr;
+  ierr = KSPGetPC(ksp_, &pc);
+  if (ierr) {
+    throw std::runtime_error("Failed to query PETSc PC after KSPSolve");
+  }
+  PCFailedReason pc_reason = PC_NOERROR;
+  ierr = PCGetFailedReason(pc, &pc_reason);
+  if (ierr) {
+    throw std::runtime_error("Failed to query PETSc PC failure reason");
+  }
   DEBUG_MSG_RANK("solve - KSP result: rank=" << rank
                  << ", reason=" << static_cast<int>(reason)
                  << ", iterations=" << its
-                 << ", residual_norm=" << rnorm);
+                 << ", residual_norm=" << rnorm
+                 << ", true_residual_norm=" << true_rnorm
+                 << ", true_relative_residual=" << rel_true_rnorm
+                 << ", pc_failed_reason=" << static_cast<int>(pc_reason));
 
   if (reason < 0) {
     std::ostringstream oss;
     oss << "PETSc GMRES solve failed. reason=" << static_cast<int>(reason)
+        << " (" << KSPConvergedReasons[reason] << ")"
         << ", iterations=" << static_cast<int>(its)
-        << ", residual=" << static_cast<double>(rnorm);
+        << ", residual=" << static_cast<double>(rnorm)
+        << ", true_residual=" << static_cast<double>(true_rnorm)
+        << ", true_relative_residual=" << static_cast<double>(rel_true_rnorm)
+        << ", pc_failed_reason=" << static_cast<int>(pc_reason);
+    if (pc_reason != PC_NOERROR) {
+      oss << " (" << PCFailedReasons[pc_reason] << ")";
+    }
     throw std::runtime_error(oss.str());
   }
 
@@ -2845,6 +3850,16 @@ void SparseSystem::solve() {
                                           << (backend_ == LinearBackend::PETSc
                                                   ? "PETSc"
                                                   : "Eigen"));
+  if (backend_ == LinearBackend::PETSc) {
+    auto petsc_solver =
+        std::dynamic_pointer_cast<PetscGMRESLinearSolver>(solver);
+    if (petsc_solver) {
+      dump_petsc_linear_system_once(petsc_solver->get_matrix(),
+                                    petsc_solver->get_rhs());
+    }
+  } else {
+    dump_eigen_linear_system_once(jacobian, residual);
+  }
   try {
     std::fprintf(stderr, "[RANK %d] SparseSystem::solve - calling factorize\n", rank);
     std::fflush(stderr);
@@ -2865,6 +3880,7 @@ void SparseSystem::solve() {
   svzero_current_block_index = static_cast<std::size_t>(-1);
 #else
   // Non-PETSc path
+  dump_eigen_linear_system_once(jacobian, residual);
   try {
     solver->factorize(jacobian);
     solver->solve(residual, dydot);

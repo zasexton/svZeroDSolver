@@ -40,6 +40,12 @@ using SvZeroIterativePreconditioner =
 #include <memory>
 #include <vector>
 
+namespace svzero {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+void set_petsc_initialize_args(int argc, char** argv);
+#endif
+}  // namespace svzero
+
 // Forward declaration of Model
 class Model;
 
@@ -190,15 +196,25 @@ class PetscGMRESLinearSolver : public LinearSolver {
 
  private:
   Mat A_ = nullptr;
+  Mat A_solve_ = nullptr;
   KSP ksp_ = nullptr;
   Vec x_ = nullptr;
   Vec b_ = nullptr;
+  Vec x_work_ = nullptr;
+  Vec b_work_ = nullptr;
+  Vec row_scale_ = nullptr;
+  Vec col_scale_ = nullptr;
   Vec x_seq_ = nullptr;
   VecScatter scatter_to_root_ = nullptr;
+  VecScatter scatter_work_to_original_ = nullptr;
+  IS row_perm_ = nullptr;
+  IS col_perm_ = nullptr;
   PetscInt n_ = 0;
   PetscInt rstart_ = 0;
   PetscInt rend_ = 0;
   bool use_bjacobi_with_ilu_ = false;
+  bool use_permuted_system_ = false;
+  bool use_scaled_system_ = false;
 };
 #endif  // SVZERODSOLVER_HAVE_PETSC && SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES
 
