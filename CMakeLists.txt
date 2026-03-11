@@ -290,8 +290,17 @@ if(SVZERODSOLVER_LINEAR_SOLVER STREQUAL "PetscGMRES")
 
   if(SVZERODSOLVER_PETSC_WITH_MPI)
     # PETSc was configured with a real MPI implementation. Find MPI here as well
-    # since the imported target from the subdirectory isn't visible at this scope.
+    # since PETSc headers included by the object libraries also require mpi.h
+    # and the MPI compile flags/include directories.
     find_package(MPI REQUIRED COMPONENTS CXX)
+    foreach(_tgt svzerodsolver svzerodcalibrator pysvzerod
+                 svzero_algebra_library svzero_model_library
+                 svzero_solve_library svzero_interface)
+      if(TARGET ${_tgt})
+        target_include_directories(${_tgt} PRIVATE ${MPI_CXX_INCLUDE_DIRS})
+        target_compile_options(${_tgt} PRIVATE ${MPI_CXX_COMPILE_OPTIONS})
+      endif()
+    endforeach()
     target_link_libraries(svzerodsolver     PRIVATE MPI::MPI_CXX)
     target_link_libraries(svzerodcalibrator PRIVATE MPI::MPI_CXX)
     target_link_libraries(pysvzerod         PRIVATE MPI::MPI_CXX)
