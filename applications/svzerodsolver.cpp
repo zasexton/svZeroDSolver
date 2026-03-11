@@ -6,6 +6,7 @@
  */
 #include <fstream>
 
+#include "SparseSystem.h"
 #include "Solver.h"
 // When using PETSc with mpiuni (no real MPI), we must avoid including any
 // external MPI headers. First include petscconf.h to get PETSC_HAVE_MPIUNI,
@@ -114,18 +115,28 @@ int main(int argc, char* argv[]) {
 #endif
 #endif
 
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+  svzero::set_petsc_initialize_args(argc, argv);
+#endif
+
   // Get input and output file name
-  if (argc < 2 || argc > 3) {
+  if (argc < 2) {
+#if defined(SVZERODSOLVER_LINEAR_SOLVER_PETSC_GMRES)
+    throw std::runtime_error(
+        "Usage: svzerodsolver path/to/config.json "
+        "[optional:path/to/output.csv] [PETSc options...]");
+#else
     throw std::runtime_error(
         "Usage: svzerodsolver path/to/config.json "
         "[optional:path/to/output.csv]");
+#endif
   }
 
   std::string input_file_name = argv[1];
   std::string output_file_path;
   std::string output_file_name;
 
-  if (argc == 3) {
+  if (argc >= 3 && argv[2][0] != '-') {
     output_file_name = argv[2];
 
   } else {
