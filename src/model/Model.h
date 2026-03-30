@@ -221,8 +221,27 @@ class Model {
   void update_constant(SparseSystem& system);
 
   /**
+   * @brief Initialize system matrices and vectors for the current model state.
+   *
+   * This may use a specialized fast path for supported static network blocks.
+   *
+   * @param system System to initialize
+   * @param time Current time
+   */
+  void initialize_system(SparseSystem& system, double time);
+
+  /**
    * @brief Update the time-dependent contributions of all elements in a sparse
    * system
+   *
+   * @param system System to update contributions at
+   * @param time Current time
+   */
+  void initialize_time(SparseSystem& system, double time);
+
+  /**
+   * @brief Update only the time-dependent contributions that change during the
+   * solve.
    *
    * @param system System to update contributions at
    * @param time Current time
@@ -271,6 +290,10 @@ class Model {
   // std::map<std::string, int> get_num_triplets();
   TripletsContributions get_num_triplets() const;
 
+  bool has_solution_dependent_terms() const;
+  bool has_constant_jacobian() const;
+  bool supports_fast_system_initialization() const;
+
   /**
    * @brief Get the number of blocks in the model
    *
@@ -314,9 +337,25 @@ class Model {
    *
    * @param initial_state The initial state vector
    */
-  void setup_initial_state_dependent_parameters(State initial_state);
+  void setup_initial_state_dependent_parameters(const State& initial_state);
 
  private:
+  bool parameter_is_time_varying(int param_id) const;
+  bool parameter_is_constant_zero(int param_id) const;
+  bool block_has_time_initializer(const Block& block) const;
+  bool block_requires_time_update(const Block& block) const;
+  bool block_time_update_affects_jacobian(const Block& block) const;
+  bool block_requires_solution_update(const Block& block) const;
+  bool block_solution_update_affects_jacobian(const Block& block) const;
+  bool block_has_initial_state_setup(const Block& block) const;
+  bool block_has_post_solve(const Block& block) const;
+  bool block_supports_fast_system_initialization(const Block& block) const;
+  void append_fast_system_entries(
+      const Block& block, std::vector<Eigen::Triplet<double>>& f_triplets,
+      std::vector<Eigen::Triplet<double>>& e_triplets,
+      Eigen::Matrix<double, Eigen::Dynamic, 1>& c_vector) const;
+  void refresh_runtime_structure();
+
   int block_count = 0;
   int node_count = 0;
   int parameter_count = 0;
@@ -339,11 +378,24 @@ class Model {
                    ///< parameter objects and is primarily used to update
                    ///< `parameter_values` at each time-step for time-dependent
                    ///< parameters and also for steady initial conditions.
+  std::vector<int>
+      time_varying_parameter_ids;  ///< Indices of parameters that need
+                                   ///< interpolation during time stepping.
   std::vector<double>
       parameter_values;  ///< Current values of the parameters. This is passed
                          ///< to blocks to set up the linear system in
                          ///< `update_constant`, `update_time` and
                          ///< `update_solution`.
+
+  TripletsContributions triplets_cache;
+  std::vector<Block*> time_initializer_blocks;
+  std::vector<Block*> active_time_update_blocks;
+  std::vector<Block*> active_solution_update_blocks;
+  std::vector<Block*> initial_state_setup_blocks;
+  std::vector<Block*> post_solve_blocks;
+  bool has_time_dependent_jacobian_terms = false;
+  bool has_solution_dependent_jacobian_terms = false;
+  bool fast_system_initialization_supported = false;
 
   bool has_windkessel_bc = false;
   double largest_windkessel_time_constant = 0.0;

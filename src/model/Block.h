@@ -209,7 +209,7 @@ class Block {
    * @param parameters The parameter values vector (at time 0)
    */
   virtual void setup_initial_state_dependent_params(
-      State initial_state, std::vector<double>& parameters);
+      const State& initial_state, std::vector<double>& parameters);
 
   /**
    * @brief Update the constant contributions of the element in a sparse system

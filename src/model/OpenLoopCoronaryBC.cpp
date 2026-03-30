@@ -57,7 +57,7 @@ void OpenLoopCoronaryBC::update_time(SparseSystem& system,
 }
 
 void OpenLoopCoronaryBC::setup_initial_state_dependent_params(
-    State initial_state, std::vector<double>& parameters) {
+    const State& initial_state, std::vector<double>& parameters) {
   auto P_in = initial_state.y[global_var_ids[0]];
   auto Q_in = initial_state.y[global_var_ids[1]];
   auto P_in_dot = initial_state.ydot[global_var_ids[0]];

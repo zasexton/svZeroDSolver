@@ -3,6 +3,11 @@
 
 #include "Solver.h"
 
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+
 #include "csv_writer.h"
 
 Solver::Solver(const nlohmann::json& config) {
@@ -57,6 +62,7 @@ Solver::Solver(const nlohmann::json& config) {
 }
 
 void Solver::setup_initial() {
+  auto started = std::chrono::steady_clock::now();
   state = initial_state;
 
   // Create steady initial condition
@@ -67,7 +73,8 @@ void Solver::setup_initial() {
 
     Integrator integrator_steady(this->model.get(), time_step_size_steady,
                                  simparams.sim_rho_infty, simparams.sim_abs_tol,
-                                 simparams.sim_nliter);
+                                 simparams.sim_nliter,
+                                 simparams.linear_solver);
 
     for (int i = 0; i < 31; i++) {
       state = integrator_steady.step(state, time_step_size_steady * double(i));
@@ -79,36 +86,41 @@ void Solver::setup_initial() {
   // Use the initial condition (steady or user-provided) to set up parameters
   // which depend on the initial condition
   this->model->setup_initial_state_dependent_parameters(state);
+  performance_summary.setup_initial_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
   DEBUG_MSG("Setup initial");
 }
 
 void Solver::setup_integrator() {
+  auto started = std::chrono::steady_clock::now();
   // Set-up integrator
   DEBUG_MSG("Setup time integration");
   integrator = Integrator(this->model.get(), simparams.sim_time_step_size,
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
-                          simparams.sim_nliter);
+                          simparams.sim_nliter, simparams.linear_solver);
 
   // Initialize loop
-  states = std::vector<State>();
-  times = std::vector<double>();
+  results.clear();
+  times.clear();
 
+  int num_states = 0;
   if (simparams.output_all_cycles) {
-    int num_states =
-        simparams.sim_num_time_steps / simparams.output_interval + 1;
-    states.reserve(num_states);
-    times.reserve(num_states);
-
+    num_states = simparams.sim_num_time_steps / simparams.output_interval + 1;
   } else {
-    int num_states =
-        simparams.sim_pts_per_cycle / simparams.output_interval + 1;
-    states.reserve(num_states);
-    times.reserve(num_states);
+    num_states = simparams.sim_pts_per_cycle / simparams.output_interval + 1;
   }
+  results.reserve(this->model->dofhandler.size(), num_states,
+                  simparams.output_derivative);
+  times.reserve(num_states);
   time = 0.0;
+  performance_summary.setup_integrator_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
 }
 
 void Solver::run_integration() {
+  auto started = std::chrono::steady_clock::now();
   // Run integrator
   DEBUG_MSG("Run time integration");
   int interval_counter = 0;
@@ -116,19 +128,18 @@ void Solver::run_integration() {
       simparams.sim_num_time_steps - simparams.sim_pts_per_cycle;
 
   if (simparams.output_all_cycles || (0 >= start_last_cycle)) {
-    times.push_back(time);
-    states.push_back(std::move(state));
+    store_output_state(state);
     DEBUG_MSG("Added initial state and time");
   }
 
   int num_time_pts_in_two_cycles;
-  std::vector<State> states_last_two_cycles;
+  std::vector<Eigen::VectorXd> states_last_two_cycles;
   int last_two_cycles_time_pt_counter = 0;
 
   if (simparams.use_cycle_to_cycle_error) {
     num_time_pts_in_two_cycles = 2 * (simparams.sim_pts_per_cycle - 1) + 1;
     states_last_two_cycles =
-        std::vector<State>(num_time_pts_in_two_cycles, state);
+        std::vector<Eigen::VectorXd>(num_time_pts_in_two_cycles, state.y);
     DEBUG_MSG("Initialized cycle to cycle error tracking with "
               << num_time_pts_in_two_cycles << " points");
   }
@@ -136,7 +147,7 @@ void Solver::run_integration() {
   for (int i = 1; i < simparams.sim_num_time_steps; i++) {
     if (simparams.use_cycle_to_cycle_error) {
       if (i == simparams.sim_num_time_steps - num_time_pts_in_two_cycles + 1) {
-        states_last_two_cycles[last_two_cycles_time_pt_counter] = state;
+        states_last_two_cycles[last_two_cycles_time_pt_counter] = state.y;
         last_two_cycles_time_pt_counter += 1;
       }
     }
@@ -145,7 +156,7 @@ void Solver::run_integration() {
 
     if (simparams.use_cycle_to_cycle_error &&
         last_two_cycles_time_pt_counter > 0) {
-      states_last_two_cycles[last_two_cycles_time_pt_counter] = state;
+      states_last_two_cycles[last_two_cycles_time_pt_counter] = state.y;
       last_two_cycles_time_pt_counter += 1;
     }
 
@@ -155,8 +166,7 @@ void Solver::run_integration() {
     if ((interval_counter == simparams.output_interval) ||
         (!simparams.output_all_cycles && (i == start_last_cycle))) {
       if (simparams.output_all_cycles || (i >= start_last_cycle)) {
-        times.push_back(time);
-        states.push_back(std::move(state));
+        store_output_state(state);
       }
       interval_counter = 0;
     }
@@ -182,7 +192,7 @@ void Solver::run_integration() {
         for (size_t i = 1; i < simparams.sim_pts_per_cycle; i++) {
           state = integrator.step(state, time);
 
-          states_last_two_cycles[last_two_cycles_time_pt_counter] = state;
+          states_last_two_cycles[last_two_cycles_time_pt_counter] = state.y;
           last_two_cycles_time_pt_counter += 1;
           interval_counter += 1;
           time = simparams.sim_time_step_size * double(i);
@@ -190,8 +200,7 @@ void Solver::run_integration() {
           if ((interval_counter == simparams.output_interval) ||
               (!simparams.output_all_cycles && (i == start_last_cycle))) {
             if (simparams.output_all_cycles || (i >= start_last_cycle)) {
-              times.push_back(time);
-              states.push_back(std::move(state));
+              store_output_state(state);
             }
             interval_counter = 0;
           }
@@ -228,6 +237,11 @@ void Solver::run_integration() {
       }
     }
   }
+  performance_summary.run_integration_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
+  performance_summary.stored_output_states = results.size();
+  performance_summary.stored_output_derivatives = results.has_derivatives();
 
   DEBUG_MSG("Avg. number of nonlinear iterations per time step: "
             << integrator.avg_nonlin_iter());
@@ -246,6 +260,66 @@ void Solver::run() {
   setup_initial();
   setup_integrator();
   run_integration();
+  if (simparams.report_performance) {
+    std::cout << get_performance_report();
+  }
+}
+
+Solver::PerformanceSummary Solver::get_performance_summary() const {
+  auto summary = performance_summary;
+  summary.stored_output_states = results.size();
+  summary.stored_output_derivatives = results.has_derivatives();
+  return summary;
+}
+
+std::string Solver::get_performance_report() const {
+  std::ostringstream out;
+  const auto summary = get_performance_summary();
+  const auto& integrator_stats = integrator.get_performance_stats();
+  const auto& linear_stats = integrator.get_linear_solve_stats();
+
+  out << std::fixed << std::setprecision(6);
+  out << "[svzerodsolver] Performance summary\n";
+  out << "  setup_initial_seconds: " << summary.setup_initial_seconds << "\n";
+  out << "  setup_integrator_seconds: " << summary.setup_integrator_seconds
+      << "\n";
+  out << "  run_integration_seconds: " << summary.run_integration_seconds
+      << "\n";
+  out << "  stored_output_states: " << summary.stored_output_states << "\n";
+  out << "  stored_output_derivatives: "
+      << (summary.stored_output_derivatives ? "true" : "false") << "\n";
+  out << "  avg_nonlinear_iterations: " << integrator.avg_nonlin_iter()
+      << "\n";
+  out << "  linear_solver_backend: " << linear_stats.backend_name << "\n";
+  out << "  linear_solver_solve_calls: " << linear_stats.solve_calls << "\n";
+  out << "  linear_solver_factorization_calls: "
+      << linear_stats.factorization_calls << "\n";
+  out << "  linear_solver_avg_iterations: "
+      << (linear_stats.solve_calls > 0
+              ? static_cast<double>(linear_stats.total_iterations) /
+                    static_cast<double>(linear_stats.solve_calls)
+              : 0.0)
+      << "\n";
+  out << "  linear_solver_last_iterations: " << linear_stats.last_iterations
+      << "\n";
+  out << "  linear_solver_last_error: " << linear_stats.last_error << "\n";
+  out << "  linear_solver_max_error: " << linear_stats.max_error << "\n";
+  out << "  model_update_time_seconds: "
+      << integrator_stats.update_time_seconds << "\n";
+  out << "  model_update_solution_seconds: "
+      << integrator_stats.update_solution_seconds << "\n";
+  out << "  residual_seconds: " << integrator_stats.residual_seconds << "\n";
+  out << "  jacobian_seconds: " << integrator_stats.jacobian_seconds << "\n";
+  out << "  linear_solve_seconds: " << integrator_stats.linear_solve_seconds
+      << "\n";
+  out << "  post_solve_seconds: " << integrator_stats.post_solve_seconds
+      << "\n";
+  return out.str();
+}
+
+void Solver::store_output_state(const State& current_state) {
+  times.push_back(time);
+  results.append(current_state);
 }
 
 std::vector<std::pair<int, int>> Solver::get_vessel_caps_dof_indices() {
@@ -275,7 +349,7 @@ std::vector<std::pair<int, int>> Solver::get_vessel_caps_dof_indices() {
 }
 
 bool Solver::check_vessel_cap_convergence(
-    const std::vector<State>& states_last_two_cycles,
+    const std::vector<Eigen::VectorXd>& states_last_two_cycles,
     const std::vector<std::pair<int, int>>& vessel_caps_dof_indices) {
   double converged = true;
   for (const std::pair<int, int>& dof_indices : vessel_caps_dof_indices) {
@@ -299,7 +373,7 @@ bool Solver::check_vessel_cap_convergence(
 
 std::pair<double, double>
 Solver::get_cycle_to_cycle_errors_in_flow_and_pressure(
-    const std::vector<State>& states_last_two_cycles,
+    const std::vector<Eigen::VectorXd>& states_last_two_cycles,
     const std::pair<int, int>& dof_indices) {
   double mean_flow_second_to_last_cycle = 0.0;
   double mean_pressure_second_to_last_cycle = 0.0;
@@ -307,16 +381,15 @@ Solver::get_cycle_to_cycle_errors_in_flow_and_pressure(
   double mean_pressure_last_cycle = 0.0;
 
   for (size_t i = 0; i < simparams.sim_pts_per_cycle; i++) {
-    mean_flow_second_to_last_cycle +=
-        states_last_two_cycles[i].y[dof_indices.first];
+    mean_flow_second_to_last_cycle += states_last_two_cycles[i][dof_indices.first];
     mean_pressure_second_to_last_cycle +=
-        states_last_two_cycles[i].y[dof_indices.second];
+        states_last_two_cycles[i][dof_indices.second];
     mean_flow_last_cycle +=
         states_last_two_cycles[simparams.sim_pts_per_cycle - 1 + i]
-            .y[dof_indices.first];
+                             [dof_indices.first];
     mean_pressure_last_cycle +=
         states_last_two_cycles[simparams.sim_pts_per_cycle - 1 + i]
-            .y[dof_indices.second];
+                             [dof_indices.second];
   }
   mean_flow_second_to_last_cycle /= simparams.sim_pts_per_cycle;
   mean_pressure_second_to_last_cycle /= simparams.sim_pts_per_cycle;
@@ -342,14 +415,14 @@ std::string Solver::get_full_result() const {
   std::string output;
 
   if (simparams.output_variable_based) {
-    output = to_variable_csv(times, states, *this->model.get(),
+    output = to_variable_csv(times, results, *this->model.get(),
                              simparams.output_mean_only,
                              simparams.output_derivative);
 
   } else {
-    output =
-        to_vessel_csv(times, states, *this->model.get(),
-                      simparams.output_mean_only, simparams.output_derivative);
+    output = to_vessel_csv(times, results, *this->model.get(),
+                           simparams.output_mean_only,
+                           simparams.output_derivative);
   }
 
   return output;
@@ -357,26 +430,12 @@ std::string Solver::get_full_result() const {
 
 Eigen::VectorXd Solver::get_single_result(const std::string& dof_name) const {
   int dof_index = this->model->dofhandler.get_variable_index(dof_name);
-  int num_states = states.size();
-  Eigen::VectorXd result = Eigen::VectorXd::Zero(num_states);
-
-  for (size_t i = 0; i < num_states; i++) {
-    result[i] = states[i].y[dof_index];
-  }
-
-  return result;
+  return results.values_for_dof(dof_index);
 }
 
 double Solver::get_single_result_avg(const std::string& dof_name) const {
   int dof_index = this->model->dofhandler.get_variable_index(dof_name);
-  int num_states = states.size();
-  Eigen::VectorXd result = Eigen::VectorXd::Zero(num_states);
-
-  for (size_t i = 0; i < num_states; i++) {
-    result[i] = states[i].y[dof_index];
-  }
-
-  return result.mean();
+  return results.mean_value_for_dof(dof_index);
 }
 
 void Solver::update_block_params(const std::string& block_name,
@@ -425,6 +484,14 @@ void Solver::sanity_checks() {
 void Solver::write_result_to_csv(const std::string& filename) const {
   DEBUG_MSG("Write output");
   std::ofstream ofs(filename);
-  ofs << get_full_result();
+  if (simparams.output_variable_based) {
+    write_variable_csv(ofs, times, results, *this->model.get(),
+                       simparams.output_mean_only,
+                       simparams.output_derivative);
+  } else {
+    write_vessel_csv(ofs, times, results, *this->model.get(),
+                     simparams.output_mean_only,
+                     simparams.output_derivative);
+  }
   ofs.close();
 }

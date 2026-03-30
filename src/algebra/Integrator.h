@@ -10,7 +10,17 @@
 #include <Eigen/Dense>
 
 #include "Model.h"
+#include "SparseSystem.h"
 #include "State.h"
+
+struct IntegratorPerformanceStats {
+  double update_time_seconds{0.0};
+  double update_solution_seconds{0.0};
+  double residual_seconds{0.0};
+  double jacobian_seconds{0.0};
+  double linear_solve_seconds{0.0};
+  double post_solve_seconds{0.0};
+};
 
 /**
  * @brief Generalized-alpha integrator
@@ -41,6 +51,7 @@ class Integrator {
   Eigen::Matrix<double, Eigen::Dynamic, 1> ydot_am;
   SparseSystem system;
   Model* model{nullptr};
+  IntegratorPerformanceStats performance_stats;
 
  public:
   /**
@@ -53,7 +64,9 @@ class Integrator {
    * @param max_iter Maximum number of non-linear iterations
    */
   Integrator(Model* model, double time_step_size, double rho, double atol,
-             int max_iter);
+             int max_iter,
+             const LinearSolverSettings& linear_solver_settings =
+                 LinearSolverSettings());
 
   /**
    * @brief Construct a new Integrator object
@@ -96,7 +109,10 @@ class Integrator {
    * @return Average number of nonlinear iterations in all step calls
    *
    */
-  double avg_nonlin_iter();
+  double avg_nonlin_iter() const;
+
+  const IntegratorPerformanceStats& get_performance_stats() const;
+  const LinearSolveStats& get_linear_solve_stats() const;
 };
 
 #endif  // SVZERODSOLVER_ALGEBRA_INTEGRATOR_HPP_

@@ -2,6 +2,8 @@
 // University of California, and others. SPDX-License-Identifier: BSD-3-Clause
 #include "SimulationParameters.h"
 
+#include <cctype>
+
 bool get_param_scalar(const nlohmann::json& data, const std::string& name,
                       const InputParameter& param, double& val) {
   if (data.contains(name)) {
@@ -40,6 +42,46 @@ bool has_parameter(
   }
   return false;
 }
+
+namespace {
+
+std::string normalize_solver_name(const std::string& name) {
+  std::string normalized;
+  normalized.reserve(name.size());
+  for (const char value : name) {
+    if (std::isalnum(static_cast<unsigned char>(value))) {
+      normalized.push_back(
+          static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
+    }
+  }
+  return normalized;
+}
+
+LinearSolverBackendType parse_linear_solver_backend(const std::string& name) {
+  const auto normalized = normalize_solver_name(name);
+  if (normalized == "sparselu" || normalized == "direct") {
+    return LinearSolverBackendType::sparse_lu;
+  }
+  if (normalized == "bicgstab" || normalized == "bicgstabilut" ||
+      normalized == "iterative") {
+    return LinearSolverBackendType::bicgstab_ilut;
+  }
+  if (normalized == "gmres" || normalized == "gmresilut") {
+    return LinearSolverBackendType::gmres_ilut;
+  }
+  if (normalized == "gmresdiagonal" || normalized == "gmresdiag") {
+    return LinearSolverBackendType::gmres_diagonal;
+  }
+  if (normalized == "treelinear" || normalized == "tree") {
+    return LinearSolverBackendType::tree_linear;
+  }
+
+  throw std::runtime_error("Unknown linear_solver '" + name +
+                           "'. Supported values are SparseLU, BiCGSTAB, "
+                           "GMRES, GMRESDiagonal, and TreeLinear.");
+}
+
+}  // namespace
 
 int generate_block(Model& model, const nlohmann::json& block_params_json,
                    const std::string& block_type, const std::string_view& name,
@@ -186,6 +228,38 @@ SimulationParameters load_simulation_params(const nlohmann::json& config) {
   sim_params.output_mean_only = sim_config.value("output_mean_only", false);
   sim_params.output_derivative = sim_config.value("output_derivative", false);
   sim_params.output_all_cycles = sim_config.value("output_all_cycles", false);
+  sim_params.report_performance = sim_config.value("report_performance", false);
+  sim_params.linear_solver.backend = parse_linear_solver_backend(
+      sim_config.value("linear_solver", std::string("SparseLU")));
+  sim_params.linear_solver.tolerance =
+      sim_config.value("linear_solver_tolerance", sim_params.sim_abs_tol);
+  sim_params.linear_solver.max_iterations =
+      sim_config.value("linear_solver_max_iterations", 0);
+  sim_params.linear_solver.ilut_drop_tolerance =
+      sim_config.value("linear_solver_ilut_drop_tolerance", 1e-4);
+  sim_params.linear_solver.ilut_fill_factor =
+      sim_config.value("linear_solver_ilut_fill_factor", 10);
+  sim_params.linear_solver.gmres_restart =
+      sim_config.value("linear_solver_gmres_restart", 50);
+  if (sim_params.linear_solver.tolerance <= 0.0) {
+    throw std::runtime_error("linear_solver_tolerance must be greater than 0");
+  }
+  if (sim_params.linear_solver.max_iterations < 0) {
+    throw std::runtime_error(
+        "linear_solver_max_iterations must be greater than or equal to 0");
+  }
+  if (sim_params.linear_solver.ilut_drop_tolerance < 0.0) {
+    throw std::runtime_error(
+        "linear_solver_ilut_drop_tolerance must be greater than or equal to 0");
+  }
+  if (sim_params.linear_solver.ilut_fill_factor < 1) {
+    throw std::runtime_error(
+        "linear_solver_ilut_fill_factor must be greater than or equal to 1");
+  }
+  if (sim_params.linear_solver.gmres_restart < 1) {
+    throw std::runtime_error(
+        "linear_solver_gmres_restart must be greater than or equal to 1");
+  }
   sim_params.sim_cardiac_period = sim_config.value("cardiac_period", -1.0);
   DEBUG_MSG("Finished loading simulation parameters");
   return sim_params;

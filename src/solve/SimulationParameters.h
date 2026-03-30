@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "LinearSolverSettings.h"
 #include "Model.h"
 #include "State.h"
 #include "debug.h"
@@ -61,6 +62,8 @@ struct SimulationParameters {
   bool output_mean_only{false};   ///< Output only the mean value
   bool output_derivative{false};  ///< Output derivatives
   bool output_all_cycles{false};  ///< Output all cardiac cycles
+  bool report_performance{false};  ///< Print solver timing breakdown
+  LinearSolverSettings linear_solver;  ///< Linear solver backend settings
 
   bool sim_coupled{
       false};  ///< Running 0D simulation coupled with external solver

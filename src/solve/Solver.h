@@ -7,6 +7,7 @@
 
 #include "Integrator.h"
 #include "Model.h"
+#include "ResultHistory.h"
 #include "SimulationParameters.h"
 #include "State.h"
 #include "debug.h"
@@ -24,6 +25,14 @@
  */
 class Solver {
  public:
+  struct PerformanceSummary {
+    double setup_initial_seconds{0.0};
+    double setup_integrator_seconds{0.0};
+    double run_integration_seconds{0.0};
+    int stored_output_states{0};
+    bool stored_output_derivatives{false};
+  };
+
   /**
    * @brief Construct a new Solver object
    *
@@ -42,6 +51,12 @@ class Solver {
 
   /// Run the simulation
   void run();
+
+  /// Get a summary of solver-side performance counters
+  PerformanceSummary get_performance_summary() const;
+
+  /// Format performance counters for log output
+  std::string get_performance_report() const;
 
   /**
    * @brief Get the full result as a csv encoded string
@@ -101,14 +116,16 @@ class Solver {
  private:
   std::shared_ptr<Model> model;
   SimulationParameters simparams;
-  std::vector<State> states;
+  ResultHistory results;
   State initial_state;
   State state;
   std::vector<double> times;
   double time;
   Integrator integrator;
+  PerformanceSummary performance_summary;
 
   void sanity_checks();
+  void store_output_state(const State& current_state);
 
   /**
    * @brief Get indices of flow and pressure degrees-of-freedom in solution
@@ -131,7 +148,7 @@ class Solver {
    * @return bool True if flows and pressures for all vessel caps have converged
    */
   bool check_vessel_cap_convergence(
-      const std::vector<State>& states_last_two_cycles,
+      const std::vector<Eigen::VectorXd>& states_last_two_cycles,
       const std::vector<std::pair<int, int>>& vessel_caps_dof_indices);
 
   /**
@@ -147,7 +164,7 @@ class Solver {
    * pressure
    */
   std::pair<double, double> get_cycle_to_cycle_errors_in_flow_and_pressure(
-      const std::vector<State>& states_last_two_cycles,
+      const std::vector<Eigen::VectorXd>& states_last_two_cycles,
       const std::pair<int, int>& dof_indices);
 };
 

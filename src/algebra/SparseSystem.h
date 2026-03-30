@@ -8,12 +8,26 @@
 #define SVZERODSOLVER_ALGREBRA_SPARSESYSTEM_HPP_
 
 #include <Eigen/Sparse>
-#include <Eigen/SparseLU>
+
 #include <iostream>
 #include <memory>
+#include <string>
+
+#include "LinearSolverBackend.h"
 
 // Forward declaration of Model
 class Model;
+
+struct LinearSolveStats {
+  std::string backend_name;
+  bool iterative{false};
+  int solve_calls{0};
+  int factorization_calls{0};
+  long long total_iterations{0};
+  int last_iterations{0};
+  double last_error{0.0};
+  double max_error{0.0};
+};
 
 /**
  * @brief Sparse system
@@ -43,6 +57,14 @@ class SparseSystem {
   SparseSystem(int n);
 
   /**
+   * @brief Construct a new Sparse System object
+   *
+   * @param n Size of the system
+   * @param linear_solver_settings Linear solver backend configuration
+   */
+  SparseSystem(int n, const LinearSolverSettings& linear_solver_settings);
+
+  /**
    * @brief Destroy the Sparse System object
    *
    */
@@ -60,10 +82,14 @@ class SparseSystem {
   Eigen::Matrix<double, Eigen::Dynamic, 1>
       dydot;  ///< Solution increment of the system
 
-  std::shared_ptr<Eigen::SparseLU<Eigen::SparseMatrix<double>>> solver =
-      std::shared_ptr<Eigen::SparseLU<Eigen::SparseMatrix<double>>>(
-          new Eigen::SparseLU<Eigen::SparseMatrix<double>>());  ///< Linear
-                                                                ///< solver
+  LinearSolverSettings linear_solver_settings;  ///< Linear solver settings
+  std::shared_ptr<LinearSolverBackend>
+      solver_backend;  ///< Linear solver backend
+  LinearSolveStats linear_solve_stats;  ///< Linear solve statistics
+  bool has_solution_dependent_terms{false};
+  bool constant_jacobian{false};
+  bool jacobian_current{false};
+  bool factorization_current{false};
 
   /**
    * @brief Reserve memory in system matrices based on number of triplets
@@ -93,6 +119,19 @@ class SparseSystem {
    * @brief Solve the system
    */
   void solve();
+
+  /**
+   * @brief Invalidate cached Jacobian and factorization state.
+   *
+   */
+  void invalidate_linearization_cache();
+
+  /**
+   * @brief Get linear solve statistics
+   *
+   * @return const LinearSolveStats&
+   */
+  const LinearSolveStats& get_linear_solve_stats() const;
 
   /**
    * @brief Delete dynamically allocated memory (class member

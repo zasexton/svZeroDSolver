@@ -147,6 +147,9 @@ int Model::add_parameter(const std::vector<double>& times,
     this->cardiac_cycle_period = param.cycle_period;
   }
   parameter_values.push_back(param.get(0.0));
+  if (!param.is_constant) {
+    time_varying_parameter_ids.push_back(param.id);
+  }
   parameters.push_back(std::move(param));
   return parameter_count++;
 }
@@ -174,6 +177,7 @@ void Model::finalize() {
   for (auto& block : blocks) {
     block->setup_model_dependent_params();
   }
+  refresh_runtime_structure();
 }
 
 int Model::get_num_blocks(bool internal) const {
@@ -187,19 +191,61 @@ int Model::get_num_blocks(bool internal) const {
 }
 
 void Model::update_constant(SparseSystem& system) {
-  for (auto block : blocks) {
+  for (const auto& block : blocks) {
     block->update_constant(system, parameter_values);
+  }
+}
+
+void Model::initialize_system(SparseSystem& system, double time) {
+  this->time = time;
+
+  for (const int param_id : time_varying_parameter_ids) {
+    parameter_values[param_id] = parameters[param_id].get(time);
+  }
+
+  if (!fast_system_initialization_supported) {
+    update_constant(system);
+    initialize_time(system, time);
+    return;
+  }
+
+  system.F.setZero();
+  system.E.setZero();
+  system.C.setZero();
+
+  std::vector<Eigen::Triplet<double>> f_triplets;
+  std::vector<Eigen::Triplet<double>> e_triplets;
+  f_triplets.reserve(triplets_cache.F + time_initializer_blocks.size());
+  e_triplets.reserve(triplets_cache.E);
+
+  for (const auto& block_ptr : blocks) {
+    append_fast_system_entries(*block_ptr, f_triplets, e_triplets, system.C);
+  }
+
+  system.F.setFromTriplets(f_triplets.begin(), f_triplets.end());
+  system.E.setFromTriplets(e_triplets.begin(), e_triplets.end());
+}
+
+void Model::initialize_time(SparseSystem& system, double time) {
+  this->time = time;
+
+  for (const int param_id : time_varying_parameter_ids) {
+    parameter_values[param_id] = parameters[param_id].get(time);
+  }
+
+  for (Block* block : time_initializer_blocks) {
+    block->update_time(system, parameter_values);
   }
 }
 
 void Model::update_time(SparseSystem& system, double time) {
   this->time = time;
 
-  for (auto& param : parameters) {
-    parameter_values[param.id] = param.get(time);
+  for (const int param_id : time_varying_parameter_ids) {
+    parameter_values[param_id] = parameters[param_id].get(time);
   }
 
-  for (auto block : blocks) {
+  for (Block* block : active_time_update_blocks) {
     block->update_time(system, parameter_values);
   }
 }
@@ -207,13 +253,13 @@ void Model::update_time(SparseSystem& system, double time) {
 void Model::update_solution(SparseSystem& system,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& y,
                             Eigen::Matrix<double, Eigen::Dynamic, 1>& dy) {
-  for (auto block : blocks) {
+  for (Block* block : active_solution_update_blocks) {
     block->update_solution(system, parameter_values, y, dy);
   }
 }
 
 void Model::post_solve(Eigen::Matrix<double, Eigen::Dynamic, 1>& y) {
-  for (auto block : blocks) {
+  for (Block* block : post_solve_blocks) {
     block->post_solve(y);
   }
 }
@@ -234,6 +280,7 @@ void Model::to_steady() {
       parameters[param_id_capacitance].update(0.0);
     }
   }
+  refresh_runtime_structure();
 }
 
 void Model::to_unsteady() {
@@ -247,21 +294,28 @@ void Model::to_unsteady() {
   for (size_t i = 0; i < get_num_blocks(true); i++) {
     get_block(i)->steady = false;
   }
+  refresh_runtime_structure();
 }
 
-TripletsContributions Model::get_num_triplets() const {
-  TripletsContributions triplets_sum;
+TripletsContributions Model::get_num_triplets() const { return triplets_cache; }
 
-  for (auto& elem : blocks) {
-    triplets_sum += elem->get_num_triplets();
-  }
-
-  return triplets_sum;
+bool Model::has_solution_dependent_terms() const {
+  return !active_solution_update_blocks.empty();
 }
 
-void Model::setup_initial_state_dependent_parameters(State initial_state) {
+bool Model::has_constant_jacobian() const {
+  return !has_time_dependent_jacobian_terms &&
+         !has_solution_dependent_jacobian_terms;
+}
+
+bool Model::supports_fast_system_initialization() const {
+  return fast_system_initialization_supported;
+}
+
+void Model::setup_initial_state_dependent_parameters(
+    const State& initial_state) {
   DEBUG_MSG("Setup initial state dependent parameters");
-  for (auto& block : blocks) {
+  for (Block* block : initial_state_setup_blocks) {
     block->setup_initial_state_dependent_params(initial_state,
                                                 parameter_values);
   }
@@ -279,4 +333,252 @@ bool Model::get_has_windkessel_bc() { return has_windkessel_bc; }
 
 double Model::get_largest_windkessel_time_constant() {
   return largest_windkessel_time_constant;
+}
+
+bool Model::parameter_is_time_varying(int param_id) const {
+  return !parameters[param_id].is_constant;
+}
+
+bool Model::parameter_is_constant_zero(int param_id) const {
+  const Parameter& parameter = parameters[param_id];
+  return parameter.is_constant && parameter.value == 0.0;
+}
+
+bool Model::block_has_time_initializer(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::flow_bc:
+    case BlockType::pressure_bc:
+    case BlockType::resistance_bc:
+    case BlockType::windkessel_bc:
+    case BlockType::open_loop_coronary_bc:
+    case BlockType::chamber_elastance_inductor:
+    case BlockType::chamber_sphere:
+    case BlockType::closed_loop_heart_pulmonary:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Model::block_requires_time_update(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::flow_bc:
+    case BlockType::pressure_bc:
+      return parameter_is_time_varying(block.global_param_ids[0]);
+    case BlockType::resistance_bc:
+      return parameter_is_time_varying(block.global_param_ids[0]) ||
+             parameter_is_time_varying(block.global_param_ids[1]);
+    case BlockType::windkessel_bc:
+      return parameter_is_time_varying(block.global_param_ids[0]) ||
+             parameter_is_time_varying(block.global_param_ids[1]) ||
+             parameter_is_time_varying(block.global_param_ids[2]) ||
+             parameter_is_time_varying(block.global_param_ids[3]);
+    case BlockType::open_loop_coronary_bc:
+      return parameter_is_time_varying(block.global_param_ids[5]);
+    case BlockType::chamber_elastance_inductor:
+    case BlockType::chamber_sphere:
+    case BlockType::closed_loop_heart_pulmonary:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Model::block_time_update_affects_jacobian(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::resistance_bc:
+      return parameter_is_time_varying(block.global_param_ids[0]);
+    case BlockType::windkessel_bc:
+      return parameter_is_time_varying(block.global_param_ids[0]) ||
+             parameter_is_time_varying(block.global_param_ids[1]) ||
+             parameter_is_time_varying(block.global_param_ids[2]);
+    case BlockType::chamber_elastance_inductor:
+    case BlockType::chamber_sphere:
+    case BlockType::closed_loop_heart_pulmonary:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Model::block_requires_solution_update(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::blood_vessel:
+      return !parameter_is_constant_zero(block.global_param_ids[3]);
+    case BlockType::blood_vessel_junction: {
+      const size_t num_outlets = block.outlet_nodes.size();
+      if (num_outlets == 0 || block.global_param_ids.size() <= 2 * num_outlets) {
+        return false;
+      }
+      for (size_t i = 2 * num_outlets; i < block.global_param_ids.size(); ++i) {
+        if (!parameter_is_constant_zero(block.global_param_ids[i])) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case BlockType::closed_loop_coronary_left_bc:
+    case BlockType::closed_loop_coronary_right_bc:
+    case BlockType::closed_loop_heart_pulmonary:
+    case BlockType::valve_tanh:
+    case BlockType::chamber_sphere:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool Model::block_solution_update_affects_jacobian(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::blood_vessel:
+    case BlockType::blood_vessel_junction:
+    case BlockType::closed_loop_heart_pulmonary:
+    case BlockType::valve_tanh:
+    case BlockType::chamber_sphere:
+      return block_requires_solution_update(block);
+    default:
+      return false;
+  }
+}
+
+bool Model::block_has_initial_state_setup(const Block& block) const {
+  return block.block_type == BlockType::open_loop_coronary_bc;
+}
+
+bool Model::block_has_post_solve(const Block& block) const {
+  return block.block_type == BlockType::closed_loop_heart_pulmonary;
+}
+
+bool Model::block_supports_fast_system_initialization(const Block& block) const {
+  switch (block.block_type) {
+    case BlockType::blood_vessel:
+    case BlockType::junction:
+    case BlockType::flow_bc:
+    case BlockType::pressure_bc:
+    case BlockType::resistance_bc:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void Model::append_fast_system_entries(
+    const Block& block, std::vector<Eigen::Triplet<double>>& f_triplets,
+    std::vector<Eigen::Triplet<double>>& e_triplets,
+    Eigen::Matrix<double, Eigen::Dynamic, 1>& c_vector) const {
+  switch (block.block_type) {
+    case BlockType::blood_vessel: {
+      const double capacitance =
+          parameter_values[block.global_param_ids[BloodVessel::CAPACITANCE]];
+      const double inductance =
+          parameter_values[block.global_param_ids[BloodVessel::INDUCTANCE]];
+      const double resistance =
+          parameter_values[block.global_param_ids[BloodVessel::RESISTANCE]];
+
+      e_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[3],
+                              -inductance);
+      e_triplets.emplace_back(block.global_eqn_ids[1], block.global_var_ids[0],
+                              -capacitance);
+      e_triplets.emplace_back(block.global_eqn_ids[1], block.global_var_ids[1],
+                              capacitance * resistance);
+
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[0],
+                              1.0);
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[1],
+                              -resistance);
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[2],
+                              -1.0);
+      f_triplets.emplace_back(block.global_eqn_ids[1], block.global_var_ids[1],
+                              1.0);
+      f_triplets.emplace_back(block.global_eqn_ids[1], block.global_var_ids[3],
+                              -1.0);
+      return;
+    }
+    case BlockType::junction: {
+      const size_t num_inlets = block.inlet_nodes.size();
+      const size_t num_outlets = block.outlet_nodes.size();
+      const size_t num_connections = num_inlets + num_outlets;
+
+      for (size_t i = 0; i + 1 < num_connections; ++i) {
+        f_triplets.emplace_back(block.global_eqn_ids[i], block.global_var_ids[0],
+                                1.0);
+        f_triplets.emplace_back(block.global_eqn_ids[i],
+                                block.global_var_ids[2 * i + 2], -1.0);
+      }
+
+      const int mass_eqn_id = block.global_eqn_ids[num_connections - 1];
+      for (size_t i = 1; i < num_inlets * 2; i += 2) {
+        f_triplets.emplace_back(mass_eqn_id, block.global_var_ids[i], 1.0);
+      }
+      for (size_t i = (num_inlets * 2) + 1; i < num_connections * 2; i += 2) {
+        f_triplets.emplace_back(mass_eqn_id, block.global_var_ids[i], -1.0);
+      }
+      return;
+    }
+    case BlockType::flow_bc:
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[1],
+                              1.0);
+      c_vector(block.global_eqn_ids[0]) = -parameter_values[block.global_param_ids[0]];
+      return;
+    case BlockType::pressure_bc:
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[0],
+                              1.0);
+      c_vector(block.global_eqn_ids[0]) = -parameter_values[block.global_param_ids[0]];
+      return;
+    case BlockType::resistance_bc:
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[0],
+                              1.0);
+      f_triplets.emplace_back(block.global_eqn_ids[0], block.global_var_ids[1],
+                              -parameter_values[block.global_param_ids[0]]);
+      c_vector(block.global_eqn_ids[0]) =
+          -parameter_values[block.global_param_ids[1]];
+      return;
+    default:
+      throw std::runtime_error(
+          "Fast system initialization encountered unsupported block type");
+  }
+}
+
+void Model::refresh_runtime_structure() {
+  triplets_cache = {};
+  time_initializer_blocks.clear();
+  active_time_update_blocks.clear();
+  active_solution_update_blocks.clear();
+  initial_state_setup_blocks.clear();
+  post_solve_blocks.clear();
+  has_time_dependent_jacobian_terms = false;
+  has_solution_dependent_jacobian_terms = false;
+  fast_system_initialization_supported = true;
+
+  for (const auto& block_ptr : blocks) {
+    Block& block = *block_ptr;
+    triplets_cache += block.get_num_triplets();
+
+    if (block_has_time_initializer(block)) {
+      time_initializer_blocks.push_back(&block);
+    }
+    if (block_requires_time_update(block)) {
+      active_time_update_blocks.push_back(&block);
+    }
+    if (block_requires_solution_update(block)) {
+      active_solution_update_blocks.push_back(&block);
+      fast_system_initialization_supported = false;
+    }
+    if (block_has_initial_state_setup(block)) {
+      initial_state_setup_blocks.push_back(&block);
+    }
+    if (block_has_post_solve(block)) {
+      post_solve_blocks.push_back(&block);
+    }
+
+    has_time_dependent_jacobian_terms =
+        has_time_dependent_jacobian_terms ||
+        block_time_update_affects_jacobian(block);
+    has_solution_dependent_jacobian_terms =
+        has_solution_dependent_jacobian_terms ||
+        block_solution_update_affects_jacobian(block);
+    fast_system_initialization_supported =
+        fast_system_initialization_supported &&
+        block_supports_fast_system_initialization(block);
+  }
 }

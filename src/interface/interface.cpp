@@ -169,7 +169,8 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     model_steady->to_steady();
     Integrator integrator_steady(
         model_steady.get(), time_step_size_steady, interface->rho_infty_,
-        interface->absolute_tolerance_, interface->max_nliter_);
+        interface->absolute_tolerance_, interface->max_nliter_,
+        simparams.linear_solver);
 
     for (size_t i = 0; i < 31; i++) {
       state = integrator_steady.step(state, time_step_size_steady * double(i));
@@ -186,7 +187,8 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   // Initialize integrator
   interface->integrator_ =
       Integrator(model.get(), interface->time_step_size_, interface->rho_infty_,
-                 interface->absolute_tolerance_, interface->max_nliter_);
+                 interface->absolute_tolerance_, interface->max_nliter_,
+                 simparams.linear_solver);
 
   DEBUG_MSG("[initialize] Done");
 }

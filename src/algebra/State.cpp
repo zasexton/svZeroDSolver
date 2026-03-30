@@ -18,8 +18,7 @@ State::State(const State& state) {
 }
 
 State State::Zero(int n) {
-  // [TODO] what's going on here, returing a static State?
-  static State state(n);
+  State state(n);
   state.y = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
   state.ydot = Eigen::Matrix<double, Eigen::Dynamic, 1>::Zero(n);
   return state;

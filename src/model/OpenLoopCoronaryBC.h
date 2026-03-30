@@ -151,7 +151,7 @@ class OpenLoopCoronaryBC : public Block {
    * @param initial_state The initial state of the system
    * @param parameters The parameter values vector (at time 0)
    */
-  void setup_initial_state_dependent_params(State initial_state,
+  void setup_initial_state_dependent_params(const State& initial_state,
                                             std::vector<double>& parameters);
 
   /**

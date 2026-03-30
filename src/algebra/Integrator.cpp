@@ -3,8 +3,11 @@
 
 #include "Integrator.h"
 
+#include <chrono>
+
 Integrator::Integrator(Model* model, double time_step_size, double rho,
-                       double atol, int max_iter) {
+                       double atol, int max_iter,
+                       const LinearSolverSettings& linear_solver_settings) {
   this->model = model;
   alpha_m = 0.5 * (3.0 - rho) / (1.0 + rho);
   alpha_f = 1.0 / (1.0 + rho);
@@ -14,8 +17,8 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
   y_coeff = gamma * time_step_size;
   y_coeff_jacobian = alpha_f * y_coeff;
 
-  size = model->dofhandler.size();
-  system = SparseSystem(size);
+  size = this->model->dofhandler.size();
+  system = SparseSystem(size, linear_solver_settings);
   this->time_step_size = time_step_size;
   this->atol = atol;
   this->max_iter = max_iter;
@@ -24,7 +27,7 @@ Integrator::Integrator(Model* model, double time_step_size, double rho,
   ydot_am = Eigen::Matrix<double, Eigen::Dynamic, 1>(size);
 
   // Make some memory reservations
-  system.reserve(model);
+  system.reserve(this->model);
 }
 
 // Must declare default constructord and dedtructor
@@ -42,11 +45,13 @@ void Integrator::update_params(double time_step_size) {
   this->time_step_size = time_step_size;
   y_coeff = gamma * time_step_size;
   y_coeff_jacobian = alpha_f * y_coeff;
-  model->update_constant(system);
-  model->update_time(system, 0.0);
+  model->initialize_system(system, 0.0);
+  system.invalidate_linearization_cache();
 }
 
 State Integrator::step(const State& old_state, double time) {
+  using clock = std::chrono::steady_clock;
+
   // Predictor: Constant y, consistent ydot
   State new_state = State::Zero(size);
   new_state.ydot += old_state.ydot * ydot_init_coeff;
@@ -56,7 +61,10 @@ State Integrator::step(const State& old_state, double time) {
   double new_time = time + alpha_f * time_step_size;
 
   // Evaluate time-dependent element contributions in system
+  auto stage_start = clock::now();
   model->update_time(system, new_time);
+  performance_stats.update_time_seconds +=
+      std::chrono::duration<double>(clock::now() - stage_start).count();
 
   // Count total number of step calls
   n_iter++;
@@ -70,10 +78,16 @@ State Integrator::step(const State& old_state, double time) {
     y_af += old_state.y + (new_state.y - old_state.y) * alpha_f;
 
     // Update solution-dependent element contribitions
+    stage_start = clock::now();
     model->update_solution(system, y_af, ydot_am);
+    performance_stats.update_solution_seconds +=
+        std::chrono::duration<double>(clock::now() - stage_start).count();
 
     // Evaluate residual
+    stage_start = clock::now();
     system.update_residual(y_af, ydot_am);
+    performance_stats.residual_seconds +=
+        std::chrono::duration<double>(clock::now() - stage_start).count();
 
     // Check termination criterium
     if (system.residual.cwiseAbs().maxCoeff() < atol) {
@@ -88,13 +102,22 @@ State Integrator::step(const State& old_state, double time) {
     }
 
     // Evaluate Jacobian
+    stage_start = clock::now();
     system.update_jacobian(alpha_m, y_coeff_jacobian);
+    performance_stats.jacobian_seconds +=
+        std::chrono::duration<double>(clock::now() - stage_start).count();
 
     // Solve system for increment in ydot
+    stage_start = clock::now();
     system.solve();
+    performance_stats.linear_solve_seconds +=
+        std::chrono::duration<double>(clock::now() - stage_start).count();
 
     // Perform post-solve actions on blocks
+    stage_start = clock::now();
     model->post_solve(new_state.y);
+    performance_stats.post_solve_seconds +=
+        std::chrono::duration<double>(clock::now() - stage_start).count();
 
     // Update the solution
     new_state.ydot += system.dydot;
@@ -107,6 +130,14 @@ State Integrator::step(const State& old_state, double time) {
   return new_state;
 }
 
-double Integrator::avg_nonlin_iter() {
+double Integrator::avg_nonlin_iter() const {
   return (double)n_nonlin_iter / (double)n_iter;
+}
+
+const IntegratorPerformanceStats& Integrator::get_performance_stats() const {
+  return performance_stats;
+}
+
+const LinearSolveStats& Integrator::get_linear_solve_stats() const {
+  return system.get_linear_solve_stats();
 }

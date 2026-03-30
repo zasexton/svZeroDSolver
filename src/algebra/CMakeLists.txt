@@ -5,9 +5,9 @@
 
 set(lib svzero_algebra_library)
 
-set(CXXSRCS Integrator.cpp SparseSystem.cpp State.cpp )
+set(CXXSRCS Integrator.cpp LinearSolverBackend.cpp SparseSystem.cpp State.cpp )
 
-set(HDRS Integrator.h SparseSystem.h State.h )
+set(HDRS Integrator.h LinearSolverBackend.h LinearSolverSettings.h SparseSystem.h State.h )
 
 add_library(${lib} OBJECT ${CXXSRCS} )
 
@@ -18,4 +18,3 @@ target_include_directories(${lib} PUBLIC
 )
 
 target_link_libraries( ${lib} Eigen3::Eigen )
-

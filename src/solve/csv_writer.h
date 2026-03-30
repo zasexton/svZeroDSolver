@@ -8,19 +8,28 @@
 #define SVZERODSOLVER_IO_CSVWRITER_HPP_
 
 #include <fstream>
+#include <ostream>
 #include <string>
 #include <vector>
 
 #include "Model.h"
-#include "State.h"
+#include "ResultHistory.h"
+
+void write_variable_csv(std::ostream& out, const std::vector<double>& times,
+                        const ResultHistory& states, const Model& model,
+                        bool mean = false, bool derivative = false);
+
+void write_vessel_csv(std::ostream& out, const std::vector<double>& times,
+                      const ResultHistory& states, const Model& model,
+                      bool mean = false, bool derivative = false);
 
 std::string to_variable_csv(const std::vector<double>& times,
-                            const std::vector<State>& states,
+                            const ResultHistory& states,
                             const Model& model, bool mean = false,
                             bool derivative = false);
 
 std::string to_vessel_csv(const std::vector<double>& times,
-                          const std::vector<State>& states, const Model& model,
+                          const ResultHistory& states, const Model& model,
                           bool mean = false, bool derivative = false);
 
 #endif  // SVZERODSOLVER_IO_CSVWRITER_HPP_
