@@ -78,3 +78,21 @@ def test_solver(testfile):
     ref = pd.read_json(os.path.join(results_dir, f'result_{testfile}'))
 
     run_with_reference(ref, os.path.join(this_file_dir, 'cases', testfile), rtol_pres, rtol_flow)
+
+
+def test_solver_robust_newton_options(tmp_path):
+    this_file_dir = os.path.abspath(os.path.dirname(__file__))
+    testfile = os.path.join(this_file_dir, 'cases', 'steadyFlow_R_R.json')
+    results_dir = os.path.join(this_file_dir, 'cases', 'results')
+
+    with open(testfile) as ff:
+        config = json.load(ff)
+
+    config['simulation_parameters']['newton_line_search'] = True
+    config['simulation_parameters']['newton_use_scaling'] = True
+    config['simulation_parameters']['adaptive_time_step'] = True
+    robust_testfile = tmp_path / 'steadyFlow_R_R_robust.json'
+    robust_testfile.write_text(json.dumps(config))
+
+    ref = pd.read_json(os.path.join(results_dir, 'result_steadyFlow_R_R.json'))
+    run_with_reference(ref, str(robust_testfile), RTOL_PRES, RTOL_FLOW)
