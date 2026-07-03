@@ -95,6 +95,16 @@ class SparseSystem {
   void solve();
 
   /**
+   * @brief Solve the row/column scaled system.
+   *
+   * Solves diag(1 / row_scale) * J * diag(column_scale) * z =
+   * diag(1 / row_scale) * residual and stores diag(column_scale) * z in dydot.
+   */
+  void solve_scaled(
+      const Eigen::Matrix<double, Eigen::Dynamic, 1>& row_scale,
+      const Eigen::Matrix<double, Eigen::Dynamic, 1>& column_scale);
+
+  /**
    * @brief Delete dynamically allocated memory (class member
    * Eigen::SparseLU<Eigen::SparseMatrix> *solver)
    */

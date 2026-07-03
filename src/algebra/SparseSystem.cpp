@@ -81,3 +81,30 @@ void SparseSystem::solve() {
   dydot.setZero();
   dydot += solver->solve(residual);
 }
+
+void SparseSystem::solve_scaled(
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& row_scale,
+    const Eigen::Matrix<double, Eigen::Dynamic, 1>& column_scale) {
+  Eigen::SparseMatrix<double> scaled_jacobian = jacobian;
+
+  for (int col = 0; col < scaled_jacobian.outerSize(); col++) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(scaled_jacobian, col);
+         it; ++it) {
+      it.valueRef() *= column_scale[it.col()] / row_scale[it.row()];
+    }
+  }
+
+  Eigen::Matrix<double, Eigen::Dynamic, 1> scaled_residual = residual;
+  scaled_residual.array() /= row_scale.array();
+
+  solver->factorize(scaled_jacobian);
+  if (solver->info() != Eigen::Success) {
+    throw std::runtime_error(
+        "System is singular. Check your model (connections, boundary "
+        "conditions, parameters).");
+  }
+
+  dydot.setZero();
+  dydot += solver->solve(scaled_residual);
+  dydot.array() *= column_scale.array();
+}
