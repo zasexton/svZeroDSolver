@@ -237,6 +237,42 @@ SimulationParameters load_simulation_params(const nlohmann::json& config) {
   }
   sim_params.sim_abs_tol = sim_config.value("absolute_tolerance", 1e-8);
   sim_params.sim_nliter = sim_config.value("maximum_nonlinear_iterations", 30);
+  sim_params.sim_newton_line_search =
+      sim_config.value("newton_line_search", false);
+  sim_params.sim_newton_line_search_reduction =
+      sim_config.value("newton_line_search_reduction", 0.5);
+  sim_params.sim_newton_line_search_min_step =
+      sim_config.value("newton_line_search_min_step", 1.0e-4);
+  sim_params.sim_newton_line_search_max_iterations =
+      sim_config.value("newton_line_search_max_iterations", 12);
+  sim_params.sim_newton_line_search_sufficient_decrease =
+      sim_config.value("newton_line_search_sufficient_decrease", 1.0e-4);
+  sim_params.sim_newton_line_search_fallback_to_full_step =
+      sim_config.value("newton_line_search_fallback_to_full_step", true);
+  sim_params.sim_newton_use_scaling =
+      sim_config.value("newton_use_scaling", false);
+  sim_params.sim_newton_pressure_scale =
+      sim_config.value("newton_pressure_scale", 1.0e4);
+  sim_params.sim_newton_flow_scale =
+      sim_config.value("newton_flow_scale", 1.0e2);
+  sim_params.sim_newton_volume_scale =
+      sim_config.value("newton_volume_scale", 1.0);
+  sim_params.sim_newton_variable_scale =
+      sim_config.value("newton_variable_scale", 1.0);
+  sim_params.sim_newton_residual_scale_floor =
+      sim_config.value("newton_residual_scale_floor", 1.0);
+  sim_params.sim_adaptive_time_step =
+      sim_config.value("adaptive_time_step", false);
+  sim_params.sim_adaptive_time_step_min_factor =
+      sim_config.value("adaptive_time_step_min_factor", 1.0e-4);
+  sim_params.sim_adaptive_time_step_reduction =
+      sim_config.value("adaptive_time_step_reduction", 0.5);
+  sim_params.sim_adaptive_time_step_growth =
+      sim_config.value("adaptive_time_step_growth", 2.0);
+  sim_params.sim_adaptive_time_step_max_retries =
+      sim_config.value("adaptive_time_step_max_retries", 12);
+  sim_params.sim_adaptive_time_step_growth_threshold =
+      sim_config.value("adaptive_time_step_growth_threshold", 4);
   sim_params.sim_steady_initial = sim_config.value("steady_initial", true);
   sim_params.sim_rho_infty = sim_config.value("rho_infty", 0.5);
   sim_params.output_variable_based =

@@ -53,6 +53,42 @@ struct SimulationParameters {
   int sim_num_time_steps{0};           ///< Total number of time steps
   int sim_nliter{0};  ///< Maximum number of non-linear iterations in time
                       ///< integration
+  bool sim_newton_line_search{
+      false};  ///< Use damped Newton backtracking line search
+  double sim_newton_line_search_reduction{
+      0.5};  ///< Line-search step reduction factor
+  double sim_newton_line_search_min_step{
+      1.0e-4};  ///< Minimum line-search damping factor
+  int sim_newton_line_search_max_iterations{
+      12};  ///< Maximum number of line-search backtracking trials
+  double sim_newton_line_search_sufficient_decrease{
+      1.0e-4};  ///< Armijo-like sufficient decrease coefficient
+  bool sim_newton_line_search_fallback_to_full_step{
+      true};  ///< Use full Newton step if no damping step improves residual
+  bool sim_newton_use_scaling{
+      false};  ///< Use scaled Newton residuals and linear systems
+  double sim_newton_pressure_scale{
+      1.0e4};  ///< Typical pressure scale for Newton scaling
+  double sim_newton_flow_scale{
+      1.0e2};  ///< Typical flow scale for Newton scaling
+  double sim_newton_volume_scale{
+      1.0};  ///< Typical volume scale for Newton scaling
+  double sim_newton_variable_scale{
+      1.0};  ///< Fallback variable scale for Newton scaling
+  double sim_newton_residual_scale_floor{
+      1.0};  ///< Minimum equation scale for Newton scaling
+  bool sim_adaptive_time_step{
+      false};  ///< Retry failed steps with smaller internal time steps
+  double sim_adaptive_time_step_min_factor{
+      1.0e-4};  ///< Minimum internal step as a factor of nominal step
+  double sim_adaptive_time_step_reduction{
+      0.5};  ///< Internal step reduction factor after failed step
+  double sim_adaptive_time_step_growth{
+      2.0};  ///< Internal step growth factor after easy step
+  int sim_adaptive_time_step_max_retries{
+      12};  ///< Maximum failed-step retries before aborting
+  int sim_adaptive_time_step_growth_threshold{
+      4};  ///< Grow internal step after this many or fewer Newton iterations
   double sim_rho_infty{0.0};  ///< Spectral radius of generalized-alpha
   int output_interval{0};     ///< Interval of writing output
 

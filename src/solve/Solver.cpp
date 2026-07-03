@@ -5,6 +5,35 @@
 
 #include "csv_writer.h"
 
+#include <algorithm>
+#include <cmath>
+#include <sstream>
+
+namespace {
+IntegratorOptions make_integrator_options(
+    const SimulationParameters& simparams) {
+  IntegratorOptions options;
+  options.newton_line_search = simparams.sim_newton_line_search;
+  options.line_search_reduction =
+      simparams.sim_newton_line_search_reduction;
+  options.line_search_min_step =
+      simparams.sim_newton_line_search_min_step;
+  options.line_search_max_iterations =
+      simparams.sim_newton_line_search_max_iterations;
+  options.line_search_sufficient_decrease =
+      simparams.sim_newton_line_search_sufficient_decrease;
+  options.line_search_fallback_to_full_step =
+      simparams.sim_newton_line_search_fallback_to_full_step;
+  options.use_newton_scaling = simparams.sim_newton_use_scaling;
+  options.pressure_scale = simparams.sim_newton_pressure_scale;
+  options.flow_scale = simparams.sim_newton_flow_scale;
+  options.volume_scale = simparams.sim_newton_volume_scale;
+  options.variable_scale = simparams.sim_newton_variable_scale;
+  options.residual_scale_floor = simparams.sim_newton_residual_scale_floor;
+  return options;
+}
+}  // namespace
+
 Solver::Solver(const nlohmann::json& config) {
   validate_input(config);
   DEBUG_MSG("Read simulation parameters");
@@ -67,10 +96,15 @@ void Solver::setup_initial() {
 
     Integrator integrator_steady(this->model.get(), time_step_size_steady,
                                  simparams.sim_rho_infty, simparams.sim_abs_tol,
-                                 simparams.sim_nliter);
+                                 simparams.sim_nliter,
+                                 make_integrator_options(simparams));
 
+    adaptive_time_step_size = time_step_size_steady;
     for (int i = 0; i < 31; i++) {
-      state = integrator_steady.step(state, time_step_size_steady * double(i));
+      const double start_time = time_step_size_steady * double(i);
+      const double target_time = time_step_size_steady * double(i + 1);
+      state = advance_state_to_time(integrator_steady, state, start_time,
+                                    target_time, time_step_size_steady);
     }
 
     this->model->to_unsteady();
@@ -87,7 +121,8 @@ void Solver::setup_integrator() {
   DEBUG_MSG("Setup time integration");
   integrator = Integrator(this->model.get(), simparams.sim_time_step_size,
                           simparams.sim_rho_infty, simparams.sim_abs_tol,
-                          simparams.sim_nliter);
+                          simparams.sim_nliter,
+                          make_integrator_options(simparams));
 
   // Initialize loop
   states = std::vector<State>();
@@ -106,6 +141,97 @@ void Solver::setup_integrator() {
     times.reserve(num_states);
   }
   time = 0.0;
+  adaptive_time_step_size = simparams.sim_time_step_size;
+}
+
+State Solver::advance_state_to_time(Integrator& step_integrator,
+                                    const State& start_state,
+                                    double start_time, double target_time,
+                                    double nominal_time_step) {
+  const double total_time_step = target_time - start_time;
+  if (total_time_step <= 0.0) {
+    return start_state;
+  }
+
+  if (!simparams.sim_adaptive_time_step) {
+    if (std::abs(total_time_step - nominal_time_step) >
+        1.0e-12 * std::max(1.0, std::abs(nominal_time_step))) {
+      step_integrator.update_params(total_time_step);
+    }
+    return step_integrator.step(start_state, start_time);
+  }
+
+  State current_state = start_state;
+  double current_time = start_time;
+  double next_time_step =
+      adaptive_time_step_size > 0.0 ? adaptive_time_step_size
+                                    : nominal_time_step;
+  const double min_time_step =
+      std::abs(nominal_time_step) * simparams.sim_adaptive_time_step_min_factor;
+  const double time_tolerance =
+      1.0e-12 * std::max(1.0, std::abs(target_time));
+
+  while (current_time < target_time - time_tolerance) {
+    const double remaining_time = target_time - current_time;
+    double trial_time_step = std::min(next_time_step, remaining_time);
+    trial_time_step = std::max(trial_time_step,
+                               std::min(min_time_step, remaining_time));
+
+    State trial_state;
+    bool accepted = false;
+    std::string last_error;
+
+    for (int retry = 0; retry <= simparams.sim_adaptive_time_step_max_retries;
+         retry++) {
+      try {
+        step_integrator.update_params(trial_time_step);
+        trial_state = step_integrator.step(current_state, current_time);
+        accepted = true;
+        break;
+      } catch (const std::exception& error) {
+        last_error = error.what();
+        const bool retry_limit_reached =
+            retry == simparams.sim_adaptive_time_step_max_retries;
+        const bool min_step_reached =
+            trial_time_step <= min_time_step * (1.0 + 1.0e-12);
+
+        if (retry_limit_reached || min_step_reached) {
+          std::ostringstream message;
+          message << "Adaptive time step failed between time " << current_time
+                  << " and " << target_time << " with dt "
+                  << trial_time_step << ". Last error: " << last_error;
+          throw std::runtime_error(message.str());
+        }
+
+        trial_time_step *= simparams.sim_adaptive_time_step_reduction;
+        trial_time_step = std::max(trial_time_step, min_time_step);
+        trial_time_step = std::min(trial_time_step, remaining_time);
+      }
+    }
+
+    if (!accepted) {
+      throw std::runtime_error("Adaptive time step failed without an error.");
+    }
+
+    current_state = trial_state;
+    current_time += trial_time_step;
+
+    const bool easy_step =
+        step_integrator.get_last_step_n_nonlin_iter() <=
+            simparams.sim_adaptive_time_step_growth_threshold &&
+        step_integrator.get_last_step_min_line_search_step() >= 0.99;
+
+    if (easy_step) {
+      next_time_step = std::min(nominal_time_step,
+                                trial_time_step *
+                                    simparams.sim_adaptive_time_step_growth);
+    } else {
+      next_time_step = std::min(nominal_time_step, trial_time_step);
+    }
+    adaptive_time_step_size = next_time_step;
+  }
+
+  return current_state;
 }
 
 void Solver::run_integration() {
@@ -141,7 +267,10 @@ void Solver::run_integration() {
       }
     }
 
-    state = integrator.step(state, time);
+    const double target_time = simparams.sim_time_step_size * double(i);
+    state = advance_state_to_time(integrator, state, time, target_time,
+                                  simparams.sim_time_step_size);
+    time = target_time;
 
     if (simparams.use_cycle_to_cycle_error &&
         last_two_cycles_time_pt_counter > 0) {
@@ -150,7 +279,6 @@ void Solver::run_integration() {
     }
 
     interval_counter += 1;
-    time = simparams.sim_time_step_size * double(i);
 
     if ((interval_counter == simparams.output_interval) ||
         (!simparams.output_all_cycles && (i == start_last_cycle))) {
@@ -180,12 +308,14 @@ void Solver::run_integration() {
 
         last_two_cycles_time_pt_counter = simparams.sim_pts_per_cycle;
         for (size_t i = 1; i < simparams.sim_pts_per_cycle; i++) {
-          state = integrator.step(state, time);
+          const double target_time = time + simparams.sim_time_step_size;
+          state = advance_state_to_time(integrator, state, time, target_time,
+                                        simparams.sim_time_step_size);
+          time = target_time;
 
           states_last_two_cycles[last_two_cycles_time_pt_counter] = state;
           last_two_cycles_time_pt_counter += 1;
           interval_counter += 1;
-          time = simparams.sim_time_step_size * double(i);
 
           if ((interval_counter == simparams.output_interval) ||
               (!simparams.output_all_cycles && (i == start_last_cycle))) {
@@ -419,6 +549,31 @@ void Solver::sanity_checks() {
     std::runtime_error(
         "ERROR: Steady initial condition is not compatible with "
         "ClosedLoopHeartAndPulmonary block.");
+  }
+
+  if (simparams.sim_adaptive_time_step) {
+    if (!(0.0 < simparams.sim_adaptive_time_step_min_factor &&
+          simparams.sim_adaptive_time_step_min_factor <= 1.0)) {
+      throw std::runtime_error(
+          "adaptive_time_step_min_factor must be in the interval (0, 1].");
+    }
+    if (!(0.0 < simparams.sim_adaptive_time_step_reduction &&
+          simparams.sim_adaptive_time_step_reduction < 1.0)) {
+      throw std::runtime_error(
+          "adaptive_time_step_reduction must be between 0 and 1.");
+    }
+    if (simparams.sim_adaptive_time_step_growth < 1.0) {
+      throw std::runtime_error(
+          "adaptive_time_step_growth must be greater than or equal to 1.");
+    }
+    if (simparams.sim_adaptive_time_step_max_retries < 0) {
+      throw std::runtime_error(
+          "adaptive_time_step_max_retries must be nonnegative.");
+    }
+    if (simparams.sim_adaptive_time_step_growth_threshold < 0) {
+      throw std::runtime_error(
+          "adaptive_time_step_growth_threshold must be nonnegative.");
+    }
   }
 }
 

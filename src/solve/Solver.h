@@ -106,9 +106,18 @@ class Solver {
   State state;
   std::vector<double> times;
   double time;
+  double adaptive_time_step_size{0.0};
   Integrator integrator;
 
   void sanity_checks();
+
+  /**
+   * @brief Advance a state to a requested time, optionally using adaptive
+   * internal substeps.
+   */
+  State advance_state_to_time(Integrator& step_integrator,
+                              const State& start_state, double start_time,
+                              double target_time, double nominal_time_step);
 
   /**
    * @brief Get indices of flow and pressure degrees-of-freedom in solution

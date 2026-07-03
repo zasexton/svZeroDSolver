@@ -11,6 +11,31 @@
 int SolverInterface::problem_id_count_ = 0;
 std::map<int, SolverInterface*> SolverInterface::interface_list_;
 
+namespace {
+IntegratorOptions make_integrator_options(
+    const SimulationParameters& simparams) {
+  IntegratorOptions options;
+  options.newton_line_search = simparams.sim_newton_line_search;
+  options.line_search_reduction =
+      simparams.sim_newton_line_search_reduction;
+  options.line_search_min_step =
+      simparams.sim_newton_line_search_min_step;
+  options.line_search_max_iterations =
+      simparams.sim_newton_line_search_max_iterations;
+  options.line_search_sufficient_decrease =
+      simparams.sim_newton_line_search_sufficient_decrease;
+  options.line_search_fallback_to_full_step =
+      simparams.sim_newton_line_search_fallback_to_full_step;
+  options.use_newton_scaling = simparams.sim_newton_use_scaling;
+  options.pressure_scale = simparams.sim_newton_pressure_scale;
+  options.flow_scale = simparams.sim_newton_flow_scale;
+  options.volume_scale = simparams.sim_newton_volume_scale;
+  options.variable_scale = simparams.sim_newton_variable_scale;
+  options.residual_scale_floor = simparams.sim_newton_residual_scale_floor;
+  return options;
+}
+}  // namespace
+
 //-----------------
 // SolverInterface
 //-----------------
@@ -131,6 +156,7 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   interface->rho_infty_ = simparams.sim_rho_infty;
   interface->max_nliter_ = simparams.sim_nliter;
   interface->absolute_tolerance_ = simparams.sim_abs_tol;
+  interface->integrator_options_ = make_integrator_options(simparams);
   interface->time_step_ = 0;
   interface->system_size_ = model->dofhandler.size();
   interface->num_time_steps_ = simparams.sim_num_time_steps;
@@ -169,7 +195,8 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
     model_steady->to_steady();
     Integrator integrator_steady(
         model_steady.get(), time_step_size_steady, interface->rho_infty_,
-        interface->absolute_tolerance_, interface->max_nliter_);
+        interface->absolute_tolerance_, interface->max_nliter_,
+        interface->integrator_options_);
 
     for (size_t i = 0; i < 31; i++) {
       state = integrator_steady.step(state, time_step_size_steady * double(i));
@@ -186,7 +213,8 @@ void initialize(std::string input_file_arg, int& problem_id, int& pts_per_cycle,
   // Initialize integrator
   interface->integrator_ =
       Integrator(model.get(), interface->time_step_size_, interface->rho_infty_,
-                 interface->absolute_tolerance_, interface->max_nliter_);
+                 interface->absolute_tolerance_, interface->max_nliter_,
+                 interface->integrator_options_);
 
   DEBUG_MSG("[initialize] Done");
 }
@@ -404,7 +432,8 @@ void increment_time(int problem_id, const double external_time,
   auto absolute_tolerance = interface->absolute_tolerance_;
   auto max_nliter = interface->max_nliter_;
   Integrator integrator(model.get(), time_step_size, interface->rho_infty_,
-                        absolute_tolerance, max_nliter);
+                        absolute_tolerance, max_nliter,
+                        interface->integrator_options_);
   auto state = interface->state_;
   interface->state_ = integrator.step(state, external_time);
   interface->time_step_ += 1;

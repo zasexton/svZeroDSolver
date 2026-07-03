@@ -83,6 +83,10 @@ class SolverInterface {
    */
   int max_nliter_ = 0;
   /**
+   * @brief Nonlinear solver options
+   */
+  IntegratorOptions integrator_options_;
+  /**
    * @brief Current time step
    */
   int time_step_ = 0.0;
